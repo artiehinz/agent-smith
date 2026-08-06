@@ -714,19 +714,6 @@
       // Stateful triage banner (progress / stalled) with operator actions.
       _renderTriageBanner(s);
 
-      // Cost
-      try {
-        const cr2 = await fetch('/api/cost?_=' + Date.now());
-        if (cr2.ok) {
-          const cost = await cr2.json();
-          const usd  = cost.est_cost_usd;
-          if (usd !== undefined) {
-            document.getElementById('cmd-cost-val').textContent = '$' + usd.toFixed(4);
-            document.getElementById('cmd-cost-group').style.display = '';
-          }
-        }
-      } catch { /* ignore */ }
-
       // Self-heal the completion latch. scanDone is one-way — set true on
       // 'complete' (below) and otherwise only cleared by the manual Clear
       // button — so after ANY completion or force-stop, every scanDone-gated

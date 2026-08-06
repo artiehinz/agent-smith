@@ -37,7 +37,7 @@ export PYTHONPATH="$(pwd)/agent-smith:$PYTHONPATH"
 Copy the entire folder into your repo as `agent-smith` and add it to `PYTHONPATH` with the
 same commands above.
 
-## Minimal API/SDK usage
+## Minimal integration with your project
 
 From your orchestration code:
 
@@ -89,7 +89,7 @@ plan = scan_session.enforce_launch_contract(
 )
 ```
 
-## Dashboard and API
+## Dashboard and local API
 
 Use the built-in HTTP bridge for local control and policy views:
 
@@ -112,6 +112,10 @@ Useful endpoints:
 - `POST /api/policy/preflight`
 - `POST /api/policy/repair`
 - `POST /api/policy/launch-plan` (if your orchestrator uses policy contracts via HTTP)
+
+This setup does not require external LLM API keys to run the dashboard or policy
+workflow bootstrap itself. Cost/tokens telemetry from API billing is intentionally
+not used.
 
 ## Bootstrap helper repos
 

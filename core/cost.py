@@ -1,6 +1,11 @@
-"""Lightweight in-memory cost telemetry shim."""
+"""Compatibility shim for legacy cost telemetry calls.
 
+API-provider token-cost accounting is intentionally disabled in this branch.
+This file keeps import compatibility for existing callers while returning
+no-op/no-cost values.
+"""
 from __future__ import annotations
+
 
 _STATE = {
     "est_cost_usd": 0.0,
@@ -9,25 +14,23 @@ _STATE = {
 
 
 def reset() -> None:
-    """Reset runtime cost counters.
-
-    This is intentionally minimal for local bootstrap compatibility.
-    Additional cost accounting providers can wrap this module and keep their own
-    persistence layer as long as ``reset`` remains callable.
-    """
+    """Reset legacy counters (no-op)."""
     _STATE["est_cost_usd"] = 0.0
     _STATE["tool_calls_total"] = 0
 
 
-def add_cost(amount_usd: float) -> None:
-    _STATE["est_cost_usd"] += max(0.0, float(amount_usd))
+def add_cost(amount_usd: float) -> None:  # pragma: no cover
+    del amount_usd
+    # Intentionally left disabled in subscription-only mode.
+    return None
 
 
 def increment_calls(count: int = 1) -> None:
-    if count > 0:
-        _STATE["tool_calls_total"] += int(count)
+    del count
+    # Intentionally left disabled in subscription-only mode.
+    return None
 
 
 def snapshot() -> dict[str, float | int]:
-    """Return the current in-memory cost summary."""
+    """Return zeroed legacy cost/call counters."""
     return dict(_STATE)

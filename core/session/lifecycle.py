@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 
 import core.session as _sess
 from core import paths as _paths
-from core import cost as cost_tracker
 from core.policy import (
     ModelAttestation,
     ModelSpec,
@@ -803,9 +802,6 @@ def start(
     # operator can see (and override) what was picked.
     from core.model_detect import detect_profile
     resolved_profile, profile_reason = detect_profile(model_profile)
-
-    # Reset cost/call counters from any previous session
-    cost_tracker.reset()
 
     preset = _sess.PRESETS.get(depth, _sess.PRESETS["standard"])
     limits = {

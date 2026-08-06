@@ -454,14 +454,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 "cells": [],
             })
 
-        if path == "/api/cost":
-            limits = session.get("limits", {}) if isinstance(session, dict) else {}
-            est = 0.0
-            max_cost = limits.get("max_cost_usd")
-            if isinstance(max_cost, (int, float)):
-                est = max_cost / 10
-            return _write_json(self, {"est_cost_usd": est})
-
         if path == "/api/policy":
             return _write_json(self, _safe_json(_api_policy_payload()))
 
