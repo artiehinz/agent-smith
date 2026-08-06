@@ -72,3 +72,24 @@ def test_do_start_web_default_unchanged(coverage_file):
     result = _do_start({"target": "https://example.com", "depth": "recon"})
     assert "kind=web" in result
     assert "scan(tool='httpx', target='https://example.com')" in result
+
+
+def test_do_start_accepts_policy_route_override(coverage_file):
+    import core.session as scan_session
+    result = _do_start({"target": "https://example.com", "depth": "recon", "route": "parallel"})
+    assert "Execution route: parallel" in result
+    session = scan_session.get() or {}
+    assert session.get("policy", {}).get("route") == "parallel"
+    assert session.get("policy", {}).get("override_applied") is True
+
+
+def test_do_start_survives_policy_ledger_write_failure(coverage_file, monkeypatch):
+    import core.session as scan_session
+    import mcp_server.session_tools.start as start_mod
+
+    monkeypatch.setattr(start_mod, "init_ledger", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("disk read-only")))
+
+    result = _do_start({"target": "https://example.com", "depth": "recon", "route": "direct"})
+    assert "Execution route: direct" in result
+    session = scan_session.get() or {}
+    assert session.get("policy", {}).get("route") == "direct"

@@ -18,10 +18,12 @@ import json
 import os
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 import core.session as _sess
 from core import cost as cost_tracker
+from core.policy import RouteContext, classify_route, route_token_budget
 
 
 def _parse_lhost(raw: str) -> tuple[str, int]:
@@ -49,6 +51,33 @@ def _parse_lhost(raw: str) -> tuple[str, int]:
     if not (1 <= port <= 65535):
         port = 4444
     return host, port
+
+
+def _default_route_policy(depth: str, scope: list[str] | None) -> dict[str, object]:
+    """Build a conservative default route policy from launch intent."""
+    depth_hint = {"quick": 2, "recon": 2, "standard": 4, "thorough": 7}.get(
+        (depth or "standard").lower(), 4
+    )
+    context = RouteContext(
+        task_breadth=depth_hint,
+        affected_packages=min(8, max(0, len(scope or []))),
+        uncertainty=3,
+        verification_complexity=depth_hint + 1,
+        independent_work_opportunities=1 if (scope or []) else 0,
+        estimated_agent_overhead=1 if depth_hint != 7 else 2,
+        route_hint=None,
+    )
+    decision = classify_route(context)
+    budget = route_token_budget(decision.route.value)
+    return {
+        "route": decision.route.value,
+        "score": decision.score,
+        "override_applied": decision.override_applied,
+        "rationale": decision.rationale,
+        "details": decision.details,
+        "token_budget": asdict(budget),
+        "policy_engine": "route_classifier_v1",
+    }
 
 
 def start(
@@ -124,6 +153,7 @@ def start(
         "model_profile": resolved_profile,
         "model_profile_reason": profile_reason,
         "scan_mode":     scan_mode,
+        "policy":       _default_route_policy(depth, scope or []),
         "tool_invocations": [],
         "known_assets": {
             "domains": [], "ips": [], "ports": [],

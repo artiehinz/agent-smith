@@ -180,6 +180,14 @@ async def session(action: str, options: dict | str | None = None, ctx: Context |
       target, depth=standard (recon|standard|thorough), scope=[],
       out_of_scope=[], max_cost_usd=, max_time_minutes=, max_tool_calls=,
       model_profile=full (full|medium|small) — controls output verbosity
+      route=direct|structured|parallel — explicit policy route override (optional)
+      route_hint=direct|structured|parallel — alias of route
+      policy_task_breadth= (0-10 integer, default from depth)
+      policy_affected_packages= (0-10 integer, default from scope list length)
+      policy_uncertainty= (0-10 integer)
+      policy_verification_complexity= (0-10 integer)
+      policy_independent_work_opportunities= (0-10 integer)
+      policy_estimated_agent_overhead= (0-10 integer)
 
     complete options: notes=
 

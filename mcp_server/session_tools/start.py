@@ -1,7 +1,10 @@
 """session(action='start') — scan bootstrap + human-facing start message."""
 from core import logger as log
 from core import session as scan_session
+from core import paths as _paths
 from mcp_server._app import _session_tools_called
+from core.policy import RouteContext, classify_route, route_token_budget
+from core.policy.task_ledger import init_ledger, record_task_event, upsert_task
 
 import mcp_server.session_tools as _st
 from .start_helpers import (
@@ -10,11 +13,122 @@ from .start_helpers import (
     _start_first_move,
 )
 
+_POLICY_LEDGER_DB = _paths.REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+
+
+def _safe_route_hint(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    hint = value.strip().lower()
+    return hint if hint in {"direct", "structured", "parallel"} else None
+
+
+def _coerce_non_negative(value: object, default: int) -> int:
+    """Coerce policy numeric fields to a safe, bounded integer."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return 10 if parsed > 10 else parsed
+
+
+def _route_context_from_options(depth: str, opts: dict, target: str) -> RouteContext:
+    """Build route-classifier inputs from explicit options and depth heuristics."""
+    scope = opts.get("scope") if isinstance(opts.get("scope"), list) else []
+    normalized_depth = (depth or "standard").lower()
+    depth_hint = {"quick": 2, "recon": 2, "standard": 4, "thorough": 7}.get(
+        normalized_depth, 4
+    )
+    return RouteContext(
+        task_breadth=_coerce_non_negative(opts.get("policy_task_breadth"), depth_hint),
+        affected_packages=_coerce_non_negative(
+            opts.get("policy_affected_packages"), min(8, max(0, len(scope)))
+        ),
+        uncertainty=_coerce_non_negative(
+            opts.get("policy_uncertainty"), 3 if "localhost" in target else 4
+        ),
+        verification_complexity=_coerce_non_negative(
+            opts.get("policy_verification_complexity"), depth_hint + 1
+        ),
+        independent_work_opportunities=_coerce_non_negative(
+            opts.get("policy_independent_work_opportunities"), 1 if "://" in target else 0
+        ),
+        estimated_agent_overhead=_coerce_non_negative(
+            opts.get("policy_estimated_agent_overhead"), 1 if normalized_depth != "thorough" else 2
+        ),
+        route_hint=_safe_route_hint(opts.get("route") or opts.get("route_hint")),
+    )
+
+
+def _build_route_policy(depth: str, opts: dict, target: str) -> dict:
+    context = _route_context_from_options(depth, opts, target)
+    decision = classify_route(context)
+    budget = route_token_budget(decision.route.value)
+    return {
+        "route": decision.route.value,
+        "score": decision.score,
+        "override_applied": decision.override_applied,
+        "rationale": decision.rationale,
+        "details": decision.details,
+        "token_budget": {
+            "task_hard": budget.task_hard,
+            "task_soft": budget.task_soft,
+            "worker_hard": budget.worker_hard,
+            "worker_soft": budget.worker_soft,
+        },
+        "policy_engine": "route_classifier_v1",
+        "route_hint": _safe_route_hint(opts.get("route") or opts.get("route_hint")),
+    }
+
+
+def _record_policy_ledger(scan_id: str, target: str, depth: str, policy: dict) -> str | None:
+    """Persist a compact policy row for this scan in SQLite.
+
+    This function is intentionally best-effort: if storage is unavailable, the
+    scan still starts with policy kept only in session.json.
+    """
+    try:
+        init_ledger(_POLICY_LEDGER_DB)
+        upsert_task(
+            _POLICY_LEDGER_DB,
+            task_id=scan_id,
+            route=policy["route"],
+            owner_role="orchestrator",
+            metadata={
+                "target": target,
+                "depth": depth,
+                "route_hint": policy.get("route_hint"),
+                "token_budget": policy["token_budget"],
+                "policy_engine": policy.get("policy_engine"),
+            },
+        )
+        record_task_event(
+            _POLICY_LEDGER_DB,
+            task_id=scan_id,
+            kind="started",
+            payload={
+                "route": policy["route"],
+                "score": policy["score"],
+                "override_applied": policy.get("override_applied"),
+            },
+        )
+        return scan_id
+    except Exception:
+        return None
+
 
 def _start_response(cfg: dict, classification: dict, target: str, scan_mode: str,
                     depth: str, is_resume: bool) -> str:
     """Build the human-facing scan-start message (advisory routing + EXECUTE NOW)."""
     lim = cfg["limits"]
+    policy = cfg.get("policy", {})
+    route_line = (
+        f"  Execution route: {policy.get('route')} (score={policy.get('score', 0):.1f})"
+        if policy
+        else "  Execution route: structured (default)"
+    )
     cost_str = f"${lim['max_cost_usd']:.2f}" if lim['max_cost_usd'] is not None else "unlimited"
     time_str = f"{lim['max_time_minutes']}min" if lim['max_time_minutes'] is not None else "unlimited"
     call_limit_str = f"{lim['max_tool_calls']} tool calls" if lim['max_tool_calls'] > 0 else "unlimited"
@@ -40,6 +154,7 @@ def _start_response(cfg: dict, classification: dict, target: str, scan_mode: str
     lines = [
         "Scan started.",
         f"  Target: {target} | Depth: {cfg['depth_label']} | Mode: {mode_label} | Limits: {cost_str}/{time_str}/{call_limit_str}",
+        route_line,
         f"  Target classification (advisory — override if recon says otherwise): "
         f"kind={classification['kind']} → recommended {classification['skill_prior']} "
         f"({classification['reason']})",
@@ -199,6 +314,11 @@ def _do_start(opts):
         model_profile=opts.get("model_profile"),  # None → auto-detect from env
         scan_mode=scan_mode,
     )
+    policy = _build_route_policy(depth, opts, target)
+    cfg["policy"] = policy
+    policy_task_id = _record_policy_ledger(str(cfg["id"]), target, depth, policy)
+    if policy_task_id:
+        cfg["policy"]["ledger_id"] = policy_task_id
     # Mint a fresh per-session dashboard token (new session == new dashboard key).
     # The dashboard URL is later surfaced with it in the URL fragment; the
     # FastAPI middleware requires it as a bearer token on every /api/* call.

@@ -172,6 +172,115 @@ class TestApiSessionTriageSelfHeal:
         assert "triage_idle_s" in body
 
 
+class TestApiSessionPolicy:
+
+    def test_get_session_includes_policy_when_present(self, sandbox_session):
+        _write_session(
+            sandbox_session,
+            status="running",
+            policy={
+                "route": "direct",
+                "score": 0.4,
+                "token_budget": {"task_hard": 500},
+            },
+        )
+        r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["policy"]["route"] == "direct"
+        assert "token_budget" in body["policy"]
+
+    def test_get_session_includes_policy_from_session_start(self, sandbox_session):
+        scan_session.start("https://policy.example", depth="standard", scope=[])
+        r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        policy = body.get("policy")
+        assert isinstance(policy, dict)
+        assert policy["route"] in {"direct", "structured", "parallel"}
+
+    def test_get_session_preserves_unknown_policy_fields(self, sandbox_session):
+        _write_session(
+            sandbox_session,
+            status="running",
+            policy={
+                "route": "structured",
+                "score": 2.1,
+                "token_budget": {"task_hard": 500},
+                "legacy_note": "kept",
+                "evidence": {"phase": "pilot"},
+            },
+        )
+        r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["policy"]["legacy_note"] == "kept"
+        assert body["policy"]["evidence"] == {"phase": "pilot"}
+
+    def test_get_session_self_heal_preserves_unknown_policy_fields(self, sandbox_session):
+        _write_session(
+            sandbox_session,
+            status="complete",
+            triage_requested=True,
+            policy={
+                "route": "parallel",
+                "legacy_note": "should-stay",
+                "details": {"tier": 2},
+            },
+        )
+        with patch("core.adjunction.pending_findings", return_value=[{"id": "F1"}]):
+            r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["policy"]["route"] == "parallel"
+        assert body["policy"]["legacy_note"] == "should-stay"
+        assert body["policy"]["details"] == {"tier": 2}
+        assert body["pending_adjudication"] == 1
+
+    def test_get_session_clear_self_heal_preserves_unknown_policy_fields(self, sandbox_session):
+        _write_session(
+            sandbox_session,
+            status="complete",
+            triage_requested=True,
+            policy={
+                "route": "direct",
+                "legacy_note": "should-stay-on-clear",
+                "flags": ["alpha", "beta"],
+            },
+        )
+        with patch("core.adjunction.pending_findings", return_value=[]), \
+             patch("core.steering.steering_queue", MagicMock()) as q:
+            r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["policy"]["route"] == "direct"
+        assert body["policy"]["legacy_note"] == "should-stay-on-clear"
+        assert body["policy"]["flags"] == ["alpha", "beta"]
+        on_disk = json.loads(sandbox_session.read_text())
+        assert not on_disk.get("triage_requested")
+        q.cancel_by_trigger.assert_called_once()
+
+    def test_get_session_preserves_policy_when_cleared_without_changes(self, sandbox_session):
+        _write_session(
+            sandbox_session,
+            status="complete",
+            triage_requested=True,
+            policy={
+                "route": "structured",
+                "legacy_note": "kept-through-clear",
+                "extras": {"a": 1, "b": 2},
+            },
+        )
+        with patch("core.adjunction.pending_findings", return_value=[]), \
+             patch("core.steering.steering_queue", MagicMock()):
+            r = client.get("/api/session")
+        assert r.status_code == 200
+        body = r.json()
+        assert body.get("policy", {}).get("route") == "structured"
+        assert body["policy"]["legacy_note"] == "kept-through-clear"
+        assert body["policy"]["extras"] == {"a": 1, "b": 2}
+
+
 # ---------------------------------------------------------------------------
 # _wake_smith_if_idle — (re)spawn a fresh Smith for the triage pass
 # ---------------------------------------------------------------------------
