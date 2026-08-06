@@ -70,13 +70,69 @@ a {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.rail-logo {
+.rail-brand-mark {
   width: 40px;
   height: 40px;
+  border-radius: 12px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #f3f8ff;
+  background:
+    radial-gradient(circle at 28% 28%, rgba(255, 255, 255, 0.3), transparent 38%),
+    linear-gradient(145deg, rgba(87, 185, 255, 0.34), rgba(88, 185, 255, 0.06) 52%, rgba(0, 0, 0, 0.12)),
+    linear-gradient(140deg, #10213d, #0a1525);
+  border: 1px solid rgba(87, 185, 255, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), 0 10px 24px rgba(9, 16, 29, 0.35);
+}
+
+.rail-brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  pointer-events: none;
+}
+
+.rail-brand-core {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  transform: translateY(1px);
+  position: relative;
+  z-index: 2;
+}
+
+.rail-logo {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  inset: 0;
+  padding: 4px;
   border-radius: 10px;
   object-fit: contain;
   background: rgba(255, 255, 255, 0.08);
-  padding: 5px;
+  opacity: 0.1;
+  filter: grayscale(1) contrast(1.25);
+  mix-blend-mode: screen;
+  object-position: center;
+  pointer-events: none;
+}
+
+.rail-brand-mark,
+.rail-logo {
+  flex-shrink: 0;
+}
+
+.rail-brand {
+  position: relative;
+}
+
+.rail-brand-text {
+  position: relative;
+  z-index: 2;
 }
 
 .rail-brand-text {
