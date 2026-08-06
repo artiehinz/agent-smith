@@ -22,8 +22,167 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 import core.session as _sess
+from core import paths as _paths
 from core import cost as cost_tracker
 from core.policy import RouteContext, classify_route, route_token_budget
+
+_POLICY_LEDGER_DB = _paths.REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+
+
+def _record_policy_completion_event(
+    status: str,
+    *,
+    route: str | None = None,
+    route_hint: str | None = None,
+    route_reset_source: str | None = None,
+    route_reset_applied: bool = False,
+    route_after_reset: str | None = None,
+    notes: str = "",
+    stop_reason: str | None = None,
+    quality_gate: str | None = None,
+) -> None:
+    """Record completion in the policy ledger when this run was launched with policy tracking."""
+    if not _sess._current:
+        return
+    policy = _sess._current.get("policy") if isinstance(_sess._current, dict) else None
+    if not isinstance(policy, dict):
+        return
+    task_id = policy.get("ledger_id")
+    if not isinstance(task_id, str) or not task_id:
+        return
+
+    payload = {
+        "status": status,
+        "notes": notes,
+        "route": route,
+        "route_hint": route_hint,
+        "route_reset_applied": route_reset_applied,
+        "route_after_reset": route_after_reset,
+        "route_reset_source": route_reset_source,
+    }
+    if stop_reason:
+        payload["stop_reason"] = stop_reason
+    if quality_gate:
+        payload["quality_gate"] = quality_gate
+
+    from core.policy import record_task_event
+
+    try:
+        record_task_event(
+            _POLICY_LEDGER_DB,
+            task_id=task_id,
+            kind="completed",
+            payload=payload,
+        )
+    except Exception:
+        pass
+
+
+def _finalize_terminal_session(
+    final_status: str,
+    *,
+    notes: str | None = None,
+    stop_reason: str | None = None,
+    quality_gate: str | None = None,
+    route_reset_source: str = "completion",
+) -> None:
+    """Finalize terminal session state and apply policy reset side-effects.
+
+    This runs both manual completion and hard-limit terminal transitions so all
+    policy bookkeeping (completion event + optional route reset) stays
+    consistent regardless of stop path.
+    """
+    if not _sess._current or _sess._current["status"] not in ("running", "intervention_required"):
+        return
+
+    _sess._current["status"] = final_status
+    if notes is not None:
+        _sess._current["notes"] = notes
+    _sess._current["finished"] = datetime.now(timezone.utc).isoformat()
+    if quality_gate:
+        _sess._current["quality_gate"] = quality_gate
+    if stop_reason is not None:
+        _sess._current["stop_reason"] = stop_reason
+
+    reset_policy = None
+    policy = _sess._current.get("policy")
+    route = None
+    route_hint = None
+    route_after_reset: str | None = None
+    if isinstance(policy, dict):
+        route = str(policy.get("route")) if policy.get("route") is not None else None
+        route_hint = str(policy.get("route_hint")) if policy.get("route_hint") is not None else None
+        reset_policy = _reset_policy_on_completion(
+            policy,
+            depth=str(_sess._current.get("depth", "standard")),
+            scope=_sess._current.get("scope") if isinstance(_sess._current.get("scope"), list) else None,
+        )
+        route_after_reset = str(reset_policy["reset_route"]) if reset_policy else None
+    _record_policy_completion_event(
+        final_status,
+        route=route,
+        route_hint=route_hint,
+        route_reset_source=route_reset_source if reset_policy else None,
+        route_reset_applied=bool(reset_policy),
+        route_after_reset=route_after_reset,
+        notes=notes or "",
+        stop_reason=stop_reason,
+        quality_gate=quality_gate,
+    )
+    if reset_policy and isinstance(policy, dict):
+        task_id = policy.get("ledger_id")
+        if isinstance(task_id, str) and task_id:
+            try:
+                from core.policy import record_task_event
+
+                record_task_event(
+                    _POLICY_LEDGER_DB,
+                    task_id=task_id,
+                    kind="route_reset",
+                    payload={
+                        "source": route_reset_source,
+                        "previous_route": reset_policy["previous_route"],
+                        "previous_route_hint": reset_policy["previous_route_hint"],
+                        "route": reset_policy["reset_route"],
+                        "notes": "policy route reset after task completion",
+                    },
+                )
+            except Exception:
+                pass
+
+    _sess._flush()
+    # Scan ended (human complete/force-complete or hard limit): snapshot the final
+    # findings into the durable training bundle (self-contained), then tear down
+    # RCE containers.
+    snapshot_training_bundle()
+    stop_pentest_containers()
+
+
+def _reset_policy_on_completion(policy: dict[str, object], depth: str, scope: list[str] | None) -> dict[str, str] | None:
+    """Reset manual route controls at task completion so overrides do not carry across tasks."""
+    if not isinstance(policy, dict):
+        return None
+
+    previous_route = policy.get("route")
+    previous_hint = policy.get("route_hint")
+    if not bool(policy.get("override_applied")) and previous_hint is None:
+        return None
+
+    baseline = _default_route_policy(depth, scope or [])
+    policy["route"] = baseline["route"]
+    policy["score"] = baseline["score"]
+    policy["rationale"] = baseline["rationale"]
+    policy["details"] = baseline["details"]
+    policy["token_budget"] = baseline["token_budget"]
+    policy["policy_engine"] = baseline["policy_engine"]
+    policy["override_applied"] = False
+    policy.pop("route_hint", None)
+
+    return {
+        "previous_route": str(previous_route) if previous_route is not None else "",
+        "previous_route_hint": str(previous_hint) if previous_hint is not None else "",
+        "reset_route": str(baseline["route"]),
+    }
 
 
 def _parse_lhost(raw: str) -> tuple[str, int]:
@@ -257,19 +416,14 @@ def complete(
     A running→terminal transition also stops the pentest containers (below).
     """
     _sess._reconcile_if_external_write()
-    if _sess._current and _sess._current["status"] == "running":
-        _sess._current["status"]   = "incomplete_with_unresolved_blockers" if quality_gate == "failed" else "complete"
-        _sess._current["finished"] = datetime.now(timezone.utc).isoformat()
-        _sess._current["notes"]    = notes
-        if quality_gate:
-            _sess._current["quality_gate"] = quality_gate
-        if stop_reason is not None:
-            _sess._current["stop_reason"] = stop_reason
-        _sess._flush()
-        # Scan ended (human complete or force-complete): snapshot the final findings into
-        # the durable training bundle (self-contained), then tear down the RCE containers.
-        snapshot_training_bundle()
-        stop_pentest_containers()
+    final_status = "incomplete_with_unresolved_blockers" if quality_gate == "failed" else "complete"
+    _finalize_terminal_session(
+        final_status,
+        notes=notes,
+        stop_reason=stop_reason,
+        quality_gate=quality_gate,
+        route_reset_source="completion",
+    )
     return _sess._current or {}
 
 

@@ -73,7 +73,7 @@
 
   // ── Tab switching ─────────────────────────────────────────────────────────
   // Order MUST match the .tab-btn DOM order in index.html's sidebar (switchTab maps by index).
-  const TAB_NAMES = ['findings', 'topology', 'components', 'coverage', 'skills', 'activity', 'world-model', 'threat-model', 'metrics', 'setup-gates', 'logs'];
+  const TAB_NAMES = ['findings', 'topology', 'components', 'coverage', 'skills', 'activity', 'world-model', 'threat-model', 'metrics', 'policy', 'setup-gates', 'logs'];
 
   function switchTab(name) {
     _activeTab = name;
@@ -100,6 +100,7 @@
     if (name === 'world-model')   pollWorldModel();
     if (name === 'metrics')       pollMetrics();
     if (name === 'threat-model')  pollThreatModel();
+    if (name === 'policy')        pollPolicy();
     if (name === 'setup-gates')   pollSetupGates();
     if (name === 'logs')          pollLogs();
   }

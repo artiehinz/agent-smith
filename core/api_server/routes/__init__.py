@@ -25,6 +25,7 @@ from . import scan_state_routes  # noqa: E402,F401
 from . import wishlist_routes  # noqa: E402,F401
 from . import setup_gate_routes  # noqa: E402,F401
 from . import triage_routes  # noqa: E402,F401
+from . import policy_routes  # noqa: E402,F401
 from . import smith_routes  # noqa: E402,F401
 from . import misc_routes  # noqa: E402,F401
 
@@ -66,6 +67,14 @@ from .triage_routes import (  # noqa: E402,F401
     api_triage,
     api_triage_cancel,
     api_force_stop,
+)
+from .policy_routes import (  # noqa: E402,F401
+    api_policy,
+    api_policy_tasks,
+    api_policy_task,
+    api_policy_preflight,
+    api_run_policy_preflight,
+    api_set_policy_route,
 )
 from .smith_routes import (  # noqa: E402,F401
     api_smith_status,

@@ -155,17 +155,20 @@ def remaining(cost_summary: dict) -> dict:
 
 def _stop(status: str, message: str) -> str:
     _sess._reconcile_if_external_write()
-    if _sess._current:
-        _sess._current["status"]      = status
-        _sess._current["stop_reason"] = message
-        _sess._current["finished"]    = datetime.now(timezone.utc).isoformat()
-        _sess._flush()
-        # A budget/time/call limit ended the scan: snapshot the final findings into the
-        # durable training bundle, then tear down the RCE containers too.
-        try:
-            from core.session.lifecycle import snapshot_training_bundle, stop_pentest_containers
-            snapshot_training_bundle()
-            stop_pentest_containers()
-        except Exception:
-            pass
+    try:
+        from core.session.lifecycle import _finalize_terminal_session
+
+        _finalize_terminal_session(
+            status,
+            stop_reason=message,
+            route_reset_source="limit_reached",
+        )
+    except Exception:
+        # Fail-soft: even if policy bookkeeping fails, the tool contract must still
+        # return the limit message and not wedge the operator loop.
+        if _sess._current and _sess._current.get("status") not in ("complete", "incomplete_with_unresolved_blockers", "limit_reached"):
+            _sess._current["status"] = status
+            _sess._current["stop_reason"] = message
+            _sess._current["finished"] = datetime.now(timezone.utc).isoformat()
+            _sess._flush()
     return message

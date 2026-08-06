@@ -24,3 +24,21 @@ def test_cost_sensitive_mismatch_uses_explicit():
     result = choose_backend("executor", "gpt-5.6-luna", "medium", attestation=att)
     assert result.selected_backend == AgentBackend.EXPLICIT
     assert result.fail_closed is True
+
+
+def test_cost_sensitive_role_without_explicit_worker_falls_back_native_with_approval():
+    att = ModelAttestation(
+        role="executor",
+        intended=ModelSpec(name="gpt-5.6-luna", effort="medium"),
+        actual=ModelSpec(name="gpt-5.6-sol", effort="ultra"),
+    )
+    result = choose_backend(
+        "executor",
+        "gpt-5.6-luna",
+        "medium",
+        attestation=att,
+        explicit_worker_available=False,
+    )
+    assert result.selected_backend == AgentBackend.NATIVE
+    assert result.requires_approval is True
+    assert result.fail_closed is True

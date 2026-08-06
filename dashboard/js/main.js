@@ -110,6 +110,7 @@
   setInterval(pollThreatModel,   POLL_MS);
   setInterval(pollQA,            POLL_MS);
   setInterval(pollMetrics,       POLL_MS * 6);
+  setInterval(() => { if (_activeTab === 'policy') pollPolicy(); }, POLL_MS);
   // #status is a shared header shown on every tab, so the "last updated Ns ago"
   // counter must keep ticking regardless of which menu item is open.
   setInterval(() => { if (!scanDone && lastOk) updateFreshness(); }, 1000);
@@ -128,6 +129,7 @@
   pollCoverage();
   pollSkills();
   pollThreatModel();
+  pollPolicy();
   pollLogs();
   pollQA();
   pollMetrics();
