@@ -903,6 +903,8 @@ def start(
     policy = _sess._current.get("policy")
     if isinstance(policy, dict):
         _init_policy_task_record(policy, scan_mode=scan_mode)
+        preflight_results = {}
+        decision_results = {}
         if _policy_preflight_targets(scan_mode):
             preflight_results, decision_results = _run_session_preflight_auto(
                 policy,
@@ -925,31 +927,33 @@ def start(
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "roles": list(preflight_results.keys()),
         }
-            if preflight_results and isinstance(policy.get("repair_loop"), dict):
-                policy["repair_loop"]["cycle"] = 0
-            elif "repair_loop" in policy:
-                policy["repair_loop"] = {"cycle": 0, "max_cycles": 2}
-            task_id = policy.get("ledger_id")
-            if isinstance(task_id, str) and task_id:
-                for role, decision_payload in decision_results.items():
-                    payload = {
-                        "mode": "session_start",
-                        "scan_mode": scan_mode,
-                        "role": role,
-                        "status": preflight_results.get(role, {}).get("status", "unknown"),
-                        "result": preflight_results.get(role, {}),
-                        "decision": decision_payload,
-                        "repair_cycle": policy.get("repair_loop", {}).get("cycle") if isinstance(policy.get("repair_loop"), dict) else 0,
-                    }
-                    try:
-                        record_task_event(
-                            _POLICY_LEDGER_DB,
-                            task_id=task_id,
-                            kind="preflight",
-                            payload=payload,
-                        )
-                    except Exception:
-                        _LOG.exception("failed to record session preflight event")
+        if preflight_results and isinstance(policy.get("repair_loop"), dict):
+            policy["repair_loop"]["cycle"] = 0
+        elif "repair_loop" in policy:
+            policy["repair_loop"] = {"cycle": 0, "max_cycles": 2}
+        task_id = policy.get("ledger_id")
+        if isinstance(task_id, str) and task_id:
+            for role, decision_payload in decision_results.items():
+                payload = {
+                    "mode": "session_start",
+                    "scan_mode": scan_mode,
+                    "role": role,
+                    "status": preflight_results.get(role, {}).get("status", "unknown"),
+                    "result": preflight_results.get(role, {}),
+                    "decision": decision_payload,
+                    "repair_cycle": policy.get("repair_loop", {}).get("cycle")
+                    if isinstance(policy.get("repair_loop"), dict)
+                    else 0,
+                }
+                try:
+                    record_task_event(
+                        _POLICY_LEDGER_DB,
+                        task_id=task_id,
+                        kind="preflight",
+                        payload=payload,
+                    )
+                except Exception:
+                    _LOG.exception("failed to record session preflight event")
     _sess._flush()
     return _sess._current
 
