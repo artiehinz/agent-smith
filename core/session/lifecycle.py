@@ -53,6 +53,7 @@ _SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES = (
     "explorer",
 )
 _SESSION_PREFLIGHT_TARGETS_ENV = "SMITH_POLICY_PRELIGHT_ROLES"
+_SESSION_PRELIGHT_MODES_ENV = "SMITH_SESSION_PRELIGHT_MODES"
 _SESSION_PRELIGHT_DISABLE_AUTO = "SMITH_DISABLE_SESSION_PRELIGHT"
 
 _DEFAULT_PRELIGHT_MODEL = "gpt-5.6-luna"
@@ -140,15 +141,24 @@ def _policy_preflight_targets(scan_mode: str | None) -> tuple[str, ...]:
     if _normalize_pref_bool(os.environ.get(_SESSION_PRELIGHT_DISABLE_AUTO), default=False):
         return ()
 
-    if (scan_mode or "").strip().lower() == "benchmark":
-        explicit = os.environ.get(_SESSION_PREFLIGHT_TARGETS_ENV, "")
-        explicit_roles = tuple(
-            role.strip().lower() for role in explicit.split(",") if role.strip()
-        )
-        if explicit_roles:
-            return tuple(r.replace("-", " ") for r in explicit_roles)
-        return _SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES
-    return ()
+    normalized_mode = (scan_mode or "").strip().lower()
+    mode_selector = os.environ.get(_SESSION_PRELIGHT_MODES_ENV, "benchmark").strip().lower()
+    allowed_modes = {mode.strip() for mode in mode_selector.split(",") if mode.strip()}
+    if not allowed_modes:
+        allowed_modes = {"benchmark"}
+    normalized_mode_tokens = set(allowed_modes)
+    if "all" in normalized_mode_tokens or "auto" in normalized_mode_tokens or "*" in normalized_mode_tokens:
+        pass
+    elif normalized_mode and normalized_mode not in normalized_mode_tokens:
+        return ()
+
+    explicit = os.environ.get(_SESSION_PREFLIGHT_TARGETS_ENV, "")
+    explicit_roles = tuple(
+        role.strip().lower() for role in explicit.split(",") if role.strip()
+    )
+    if explicit_roles:
+        return tuple(r.replace("-", " ") for r in explicit_roles)
+    return _SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES
 
 
 def _resolve_preflight_intent(role: str, model_profile: str | None) -> PreflightIntent:
@@ -183,7 +193,13 @@ def _build_policy_attestation(intent: PreflightIntent, result) -> ModelAttestati
     return ModelAttestation(role=intent.role, intended=ModelSpec(name=intent.model, effort=intent.effort), actual=actual)
 
 
-def _build_backend_decision_payload(role: str, decision, command: list[str] | None) -> dict[str, object]:
+def _build_backend_decision_payload(
+    role: str,
+    decision,
+    route: str | None = None,
+    route_hint: str | None = None,
+    command: list[str] | None = None,
+) -> dict[str, object]:
     return {
         "role": role,
         "selected_backend": decision.selected_backend.value,
@@ -191,6 +207,8 @@ def _build_backend_decision_payload(role: str, decision, command: list[str] | No
         "fail_closed": decision.fail_closed,
         "requires_approval": decision.requires_approval,
         "reason": decision.reason,
+        "route": route,
+        "route_hint": route_hint,
         "command": command,
     }
 
@@ -234,6 +252,10 @@ def _run_session_preflight_auto(policy: dict[str, object], scan_mode: str | None
     explicit_worker_available = shutil.which("codex") is not None
     if not policy or not isinstance(policy, dict):
         return preflight_by_role, backend_by_role
+    route = str(policy.get("route") or "direct")
+    route_hint = policy.get("route_hint")
+    if route_hint is not None:
+        route_hint = str(route_hint)
     roles = _policy_preflight_targets(scan_mode)
     if not roles:
         return preflight_by_role, backend_by_role
@@ -251,9 +273,13 @@ def _run_session_preflight_auto(policy: dict[str, object], scan_mode: str | None
                 attestation=attestation,
                 explicit_worker_available=explicit_worker_available,
             )
-            command = explicit_worker_args(model=intent.model, effort=intent.effort)
             preflight_payload = attestation_payload(result, marker)
-            backend_payload = _build_backend_decision_payload(role, decision, command)
+            command = (
+                explicit_worker_args(model=intent.model, effort=intent.effort)
+                if decision.selected_backend.value == "explicit_codex_exec"
+                else None
+            )
+            backend_payload = _build_backend_decision_payload(role, decision, route=route, route_hint=route_hint)
             backend_payload["requires_approval"] = decision.requires_approval
             backend_payload["fail_closed"] = should_disable_delegation(
                 decision.selected_backend,
@@ -284,7 +310,9 @@ def _run_session_preflight_auto(policy: dict[str, object], scan_mode: str | None
                 "requires_approval": False,
                 "reason": "session auto preflight failed",
                 "mode": "auto",
-                "command": [],
+                "command": None,
+                "route": route,
+                "route_hint": route_hint,
             }
     return preflight_by_role, backend_by_role
 
@@ -340,6 +368,10 @@ def _finalize_terminal_session(
         stop_reason=stop_reason,
         quality_gate=quality_gate,
     )
+    if isinstance(policy, dict):
+        policy["route_reset_applied"] = bool(reset_policy)
+        policy["route_reset_source"] = route_reset_source if reset_policy else None
+        policy["route_after_reset"] = route_after_reset
     if reset_policy and isinstance(policy, dict):
         task_id = policy.get("ledger_id")
         if isinstance(task_id, str) and task_id:
@@ -516,10 +548,7 @@ def policy_launch_plan(
         attestation=attestation,
         explicit_worker_available=explicit_worker_available,
     )
-    should_block = should_disable_delegation(
-        decision.selected_backend,
-        attestation=attestation,
-    )
+    should_block = bool(decision.fail_closed)
     payload = {
         "enabled": True,
         "role": normalized_role,
@@ -603,6 +632,147 @@ def evaluate_policy_launch(
                     _LOG.exception("failed to record policy launch event")
             _sess._flush()
     return decision
+
+
+def resolve_launch_contract(
+    role: str,
+    intended_model: str,
+    intended_effort: str,
+    *,
+    explicit_worker_available: bool = True,
+) -> dict[str, object]:
+    """Return an authoritative launch contract for orchestration boundaries.
+
+    External callers should treat this as the execution contract before selecting
+    a launch path or subprocess invocation.
+    """
+    decision = evaluate_policy_launch(
+        role,
+        intended_model=intended_model,
+        intended_effort=intended_effort,
+        explicit_worker_available=explicit_worker_available,
+    )
+    if not isinstance(decision, dict):
+        return {"ok": False, "error": "invalid policy decision"}
+
+    status = str(decision.get("status", "unknown"))
+    selected_backend = str(decision.get("selected_backend", ""))
+    explicit_backend = selected_backend == "explicit_codex_exec"
+
+    return {
+        "ok": status == "authorized",
+        "launch_authorized": status == "authorized",
+        "enabled": bool(decision.get("enabled", False)),
+        "role": decision.get("role"),
+        "route": decision.get("route"),
+        "route_hint": decision.get("route_hint"),
+        "selected_backend": decision.get("selected_backend"),
+        "fallback_backend": decision.get("fallback_backend"),
+        "requires_approval": bool(decision.get("requires_approval", False)),
+        "fail_closed": bool(decision.get("fail_closed", False)),
+        "block_delegation": bool(decision.get("block_delegation", False)),
+        "reason": decision.get("reason"),
+        "status": status,
+        "action": decision.get("action"),
+        "command": decision.get("command") if explicit_backend else None,
+        "launch_command": decision.get("command") if explicit_backend else None,
+        "command_path": "codex exec" if explicit_backend else "native_subagent",
+        "requires_runtime_proxy": not explicit_backend,
+    }
+
+
+def enforce_launch_contract(
+    role: str,
+    intended_model: str,
+    intended_effort: str,
+    *,
+    explicit_worker_available: bool = True,
+) -> dict[str, object]:
+    """Return an execution-ready decision with action-only contract semantics.
+
+    The caller should treat any non-`authorized` action as a hard gate and avoid
+    launching workers until policy state changes.
+    """
+    contract = resolve_launch_contract(
+        role,
+        intended_model=intended_model,
+        intended_effort=intended_effort,
+        explicit_worker_available=explicit_worker_available,
+    )
+    action_raw = str(contract.get("action") or contract.get("status", "blocked")).strip()
+    action = action_raw if action_raw in {"authorized", "needs_approval", "blocked"} else "blocked"
+
+    if action == "authorized":
+        return {
+            "ok": True,
+            "action": action,
+            "contract": contract,
+            "launch": True,
+            "status": contract.get("status"),
+        }
+    if action == "needs_approval":
+        return {
+            "ok": False,
+            "action": action,
+            "contract": contract,
+            "launch": False,
+            "requires_approval": True,
+            "status": contract.get("status"),
+        }
+
+    return {
+        "ok": False,
+        "action": action,
+        "contract": contract,
+        "launch": False,
+        "status": contract.get("status"),
+        "reason": contract.get("reason", "policy launch blocked"),
+    }
+
+
+def enforce_and_execute_launch(
+    role: str,
+    intended_model: str,
+    intended_effort: str,
+    launch_executor,
+    *,
+    explicit_worker_available: bool = True,
+    **launch_kwargs,
+) -> dict[str, object]:
+    """Evaluate policy and invoke `launch_executor` only on authorization.
+
+    `launch_executor` receives the approved `contract` and must return a mapping
+    describing launch result details. This function injects no launch semantics of
+    its own and is therefore safe for external orchestration wiring.
+    """
+    gate = enforce_launch_contract(
+        role,
+        intended_model=intended_model,
+        intended_effort=intended_effort,
+        explicit_worker_available=explicit_worker_available,
+    )
+    if not isinstance(gate, dict) or not gate.get("launch"):
+        return gate
+
+    contract = gate.get("contract")
+    if not isinstance(contract, dict):
+        return {
+            "ok": False,
+            "action": "blocked",
+            "status": "blocked",
+            "reason": "policy contract missing",
+            "launch": False,
+            "contract": None,
+        }
+    execution = launch_executor(contract=contract, **launch_kwargs)
+    return {
+        "ok": True,
+        "action": "authorized",
+        "status": "authorized",
+        "launch": True,
+        "contract": contract,
+        "execution": execution,
+    }
 
 
 def start(
@@ -739,17 +909,22 @@ def start(
                 scan_mode=scan_mode,
                 model_profile=resolved_profile,
             )
-            if preflight_results:
-                policy["preflight"] = preflight_results
-            if decision_results:
-                policy["backend_decisions"] = decision_results
-            policy["policy_preflight_state"] = {
-                "mode": "session_start",
-                "status": "completed",
-                "scan_mode": scan_mode,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "roles": list(preflight_results.keys()),
-            }
+        if preflight_results:
+            policy["preflight"] = preflight_results
+        if decision_results:
+            policy["backend_decisions"] = decision_results
+        preflight_status = "completed"
+        if preflight_results and any(
+            result.get("status") != "match" for result in preflight_results.values()
+        ):
+            preflight_status = "issues_detected"
+        policy["policy_preflight_state"] = {
+            "mode": "session_start",
+            "status": preflight_status,
+            "scan_mode": scan_mode,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "roles": list(preflight_results.keys()),
+        }
             if preflight_results and isinstance(policy.get("repair_loop"), dict):
                 policy["repair_loop"]["cycle"] = 0
             elif "repair_loop" in policy:

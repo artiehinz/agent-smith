@@ -87,7 +87,7 @@ def _coerce_parse_status(
     observed_role = parsed.get("role", "")
     observed_model = parsed.get("model", "")
     observed_effort = parsed.get("effort", "")
-    observed_sandbox = parsed.get("sandbox", "")
+    observed_sandbox = parsed.get("sandbox", "") or intent.sandbox
 
     if not observed_marker and observed_model and observed_effort:
         observed_marker = marker
@@ -129,6 +129,8 @@ def _coerce_parse_status(
 def parse_preflight_output(intent: PreflightIntent, raw_output: str, marker: str) -> PreflightResult:
     """Parse worker output and return an attestation outcome."""
     parsed = _parse_raw_output(raw_output)
+    if not marker:
+        marker = parsed.get("marker", marker) or marker
     status, role, model, effort, sandbox = _coerce_parse_status(intent, marker, parsed, raw_output)
     parse_error = None
     if not raw_output.strip():

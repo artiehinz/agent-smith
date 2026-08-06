@@ -81,13 +81,20 @@ def _attestation_payload(result: PreflightResult, marker_expected: str | None) -
     return attestation_payload(result, marker_expected)
 
 
-def _backend_decision_payload(role: str, decision) -> dict[str, Any]:
+def _backend_decision_payload(
+    role: str,
+    decision,
+    route: str | None = None,
+    route_hint: str | None = None,
+) -> dict[str, Any]:
     return {
         "role": decision.role,
         "selected_backend": decision.selected_backend.value,
         "fallback_backend": decision.fallback_backend.value if decision.fallback_backend else None,
         "fail_closed": decision.fail_closed,
         "requires_approval": decision.requires_approval,
+        "route": route,
+        "route_hint": route_hint,
         "reason": decision.reason,
     }
 
@@ -141,7 +148,7 @@ def _update_policy_field(policy: dict, key: str, value: dict[str, Any]) -> None:
 def _policy_route_hint(policy: dict[str, Any] | None) -> str | None:
     if not isinstance(policy, dict):
         return None
-    route = policy.get("route_hint")
+    route = policy.get("route_hint") or policy.get("route")
     if route:
         return str(route)
     return None
@@ -376,9 +383,14 @@ async def api_run_policy_preflight(payload: dict | None = None) -> JSONResponse:
 
         if raw_output:
             mode = "manual"
-            result = parse_preflight_output(intent, raw_output, marker)
+            manual_marker = _normalize_string(payload.get("marker")) or ""
+            result = parse_preflight_output(intent, raw_output, manual_marker)
+            marker = manual_marker
         else:
+            if not marker:
+                marker = generate_preflight_marker()
             result = run_preflight_probe(intent, marker)
+        marker = result.marker
 
         attestation = _build_attestation(result)
         decision = choose_backend(
@@ -390,14 +402,20 @@ async def api_run_policy_preflight(payload: dict | None = None) -> JSONResponse:
         )
 
         preflight_payload = _attestation_payload(result, marker)
-        decision_payload = _backend_decision_payload(role, decision)
+        route = None
+        route_hint = None
+        decision_payload = _backend_decision_payload(role, decision, route=route, route_hint=route_hint)
         decision_payload["intent"] = {
             "role": role,
             "model": intended_model,
             "effort": intended_effort,
             "sandbox": intent.sandbox,
         }
-        decision_payload["command"] = explicit_worker_args(model=intended_model, effort=intended_effort)
+        decision_payload["command"] = (
+            explicit_worker_args(model=intended_model, effort=intended_effort)
+            if decision.selected_backend.value == "explicit_codex_exec"
+            else None
+        )
         decision_payload["mode"] = mode
         preflight_payload["role"] = role
         preflight_payload["mode"] = mode
@@ -409,6 +427,21 @@ async def api_run_policy_preflight(payload: dict | None = None) -> JSONResponse:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=409)
 
         policy = session_data.get("policy")
+        if isinstance(policy, dict):
+            route = str(policy.get("route") or "direct")
+            raw_route_hint = policy.get("route_hint")
+            if raw_route_hint is not None:
+                route_hint = str(raw_route_hint)
+            decision_payload = _backend_decision_payload(
+                role,
+                decision,
+                route=route,
+                route_hint=route_hint,
+            )
+            if decision.selected_backend.value == "explicit_codex_exec":
+                decision_payload["command"] = explicit_worker_args(model=intended_model, effort=intended_effort)
+            else:
+                decision_payload["command"] = None
         repair_payload = {"cycle": 0, "max_cycles": 2}
         if isinstance(policy, dict):
             _update_policy_field(policy, "preflight", preflight_payload)
@@ -490,28 +523,28 @@ async def api_policy_launch_plan(payload: dict | None = None) -> JSONResponse:
 
     try:
         from core import session as scan_session
-        from core.session.lifecycle import evaluate_policy_launch
+        from core.session import resolve_launch_contract
 
         scan_session.load_from_disk(force=True)
-        decision = evaluate_policy_launch(
+        contract = resolve_launch_contract(
             role,
             intended_model=intended_model,
             intended_effort=intended_effort,
             explicit_worker_available=explicit_worker_available,
         )
-        if not decision.get("enabled", False):
+        if not contract.get("enabled", False):
             return JSONResponse({
                 "ok": False,
-                "error": decision.get("reason", "policy launch disabled"),
+                "error": contract.get("reason", "policy launch disabled"),
                 "enabled": False,
             }, status_code=409)
-        if decision.get("action") in {"blocked", "needs_approval"}:
+        if contract.get("action") in {"blocked", "needs_approval"}:
             return JSONResponse({
                 "ok": False,
                 "enabled": True,
-                "decision": decision,
+                "decision": contract,
             }, status_code=423)
-        return JSONResponse({"ok": True, "decision": decision})
+        return JSONResponse({"ok": True, "decision": contract})
     except Exception:
         _log.exception("failed to evaluate policy launch plan")
         return JSONResponse({"ok": False, "error": "request failed"}, status_code=500)

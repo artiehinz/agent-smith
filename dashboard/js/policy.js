@@ -3,6 +3,7 @@ let _policyTasks = null;
 let _policyPreflight = null;
 let _policyBackendDecisions = null;
 let _policyPreflightState = null;
+let _policyTaskDetail = null;
 
 function _taskQueryString() {
   const params = new URLSearchParams();
@@ -12,6 +13,7 @@ function _taskQueryString() {
   const since = (document.getElementById('policy-task-since')?.value || '').trim();
   const until = (document.getElementById('policy-task-until')?.value || '').trim();
   const limit = parseInt((document.getElementById('policy-task-limit')?.value || '12').trim(), 10);
+  const offset = parseInt((document.getElementById('policy-task-offset')?.value || '0').trim(), 10);
 
   if (status) params.set('status', status);
   if (owner) params.set('owner_role', owner);
@@ -19,6 +21,7 @@ function _taskQueryString() {
   if (since) params.set('since', since);
   if (until) params.set('until', until);
   if (Number.isFinite(limit) && limit > 0) params.set('limit', String(limit));
+  if (Number.isFinite(offset) && offset >= 0) params.set('offset', String(offset));
   return params.toString() ? `?${params.toString()}` : '';
 }
 
@@ -38,6 +41,16 @@ async function pollPolicy() {
     _policyPreflight = preflightPayload && preflightPayload.ok ? (preflightPayload.preflight || {}) : {};
     _policyBackendDecisions = preflightPayload && preflightPayload.ok ? (preflightPayload.backend_decisions || {}) : {};
     _policyPreflightState = preflightPayload && preflightPayload.ok ? (preflightPayload.policy_preflight_state || null) : null;
+
+    const taskId = (_policy && typeof _policy === 'object' && _policy.ledger_id) ? String(_policy.ledger_id) : '';
+    _policyTaskDetail = null;
+    if (taskId) {
+      const taskRes = await fetch(`/api/policy/tasks/${taskId}`);
+      const taskPayload = taskRes.ok ? await taskRes.json() : null;
+      if (taskPayload && taskPayload.ok) {
+        _policyTaskDetail = taskPayload;
+      }
+    }
 
     _renderPolicyTab();
   } catch (err) {
@@ -72,6 +85,8 @@ function _safeRenderPolicySummary(sessionPolicy) {
   const override = sessionPolicy.override_applied ? 'yes' : 'no';
   const engine = sessionPolicy.policy_engine || 'n/a';
   const resetApplied = sessionPolicy.route_reset_applied ? 'yes' : 'no';
+  const resetSource = sessionPolicy.route_reset_source || 'n/a';
+  const resetAfter = sessionPolicy.route_after_reset || 'n/a';
   const tokenBudget = sessionPolicy.token_budget || {};
 
   el.innerHTML = `
@@ -83,6 +98,8 @@ function _safeRenderPolicySummary(sessionPolicy) {
     <div><strong>Rationale:</strong> ${(sessionPolicy.rationale || []).join(', ') || 'n/a'}</div>
     <div><strong>Token budget:</strong> task hard=${tokenBudget.task_hard || 'n/a'}, worker hard=${tokenBudget.worker_hard || 'n/a'}</div>
     <div><strong>Route reset last attempt:</strong> ${resetApplied}</div>
+    <div><strong>Route reset source:</strong> ${resetSource}</div>
+    <div><strong>Route after reset:</strong> ${resetAfter}</div>
   `;
 
   const routeText = `Current route: ${route}` + (routeHint !== 'n/a' ? ` (hint: ${routeHint})` : '');
@@ -124,6 +141,44 @@ function _safeRenderPolicyTasks(policyTasks) {
     return `<div><strong>${_policyStatusIcon(status)} ${task.task_id}</strong> - route=${route} owner=${owner} status=${status} hint=${hint}</div>`;
   }).join('');
   el.innerHTML = body;
+}
+
+function _safeRenderPolicyTaskDetail(taskDetail) {
+  const el = document.getElementById('policy-task-detail');
+  if (!el) return;
+  if (!taskDetail || !taskDetail.ok) {
+    el.textContent = 'Task telemetry not yet available.';
+    return;
+  }
+
+  const events = Array.isArray(taskDetail.events) ? taskDetail.events : [];
+  const completion = events.slice().reverse().find((event) => event.kind === 'completed');
+  const routeReset = events.slice().reverse().find((event) => event.kind === 'route_reset');
+  const launchEvents = events.filter((event) => event.kind && event.kind.startsWith('delegation_'));
+
+  const rows = [];
+  if (completion) {
+    const payload = completion.payload || {};
+    rows.push(`<div><strong>completion:</strong> status=${payload.status || completion.status || 'n/a'} route=${payload.route || 'n/a'} hint=${payload.route_hint || 'n/a'} route_reset_applied=${payload.route_reset_applied ? 'yes' : 'no'} route_reset_source=${payload.route_reset_source || 'n/a'} route_after_reset=${payload.route_after_reset || 'n/a'}</div>`);
+  }
+  if (routeReset) {
+    const resetPayload = routeReset.payload || {};
+    rows.push(`<div><strong>route_reset:</strong> from ${resetPayload.previous_route || 'n/a'} -> ${resetPayload.route || 'n/a'} (${resetPayload.source || 'n/a'})</div>`);
+  }
+  if (launchEvents.length) {
+    const lastLaunch = launchEvents[launchEvents.length - 1];
+    const launchPayload = lastLaunch.payload || {};
+    const selectedBackend = launchPayload.selected_backend || 'n/a';
+    const requiresApproval = launchPayload.requires_approval ? 'yes' : 'no';
+    const blocked = launchPayload.block_delegation ? 'yes' : 'no';
+    rows.push(`<div><strong>latest launch:</strong> backend=${selectedBackend}, requires_approval=${requiresApproval}, blocked=${blocked}, status=${launchPayload.status || launchPayload.action || 'n/a'}</div>`);
+  }
+
+  if (!rows.length) {
+    el.textContent = 'Task telemetry not yet recorded.';
+    return;
+  }
+  el.innerHTML = `<strong>Task telemetry:</strong><div style="margin-top:8px;">${rows.join('<br/>')}</div>`;
 }
 
 function _renderPolicyPreflight(summary) {
@@ -228,6 +283,7 @@ function _renderPolicyTab() {
   _safeRenderPolicySummary(_policy);
   _safeRenderPolicyBudget(_policy ? _policy.token_budget : null);
   _safeRenderPolicyTasks(_policyTasks);
+  _safeRenderPolicyTaskDetail(_policyTaskDetail);
   _renderPolicyPreflight(_policyPreflight);
   _renderPolicyBackendDecisions(_policyBackendDecisions);
   _renderPolicyPreflightState(_policyPreflightState);

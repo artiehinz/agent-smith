@@ -2,6 +2,7 @@
 references/
 skills/
 .codex-control/
+session.json
 tools/policy/artifacts/
 core/policy/__pending__/
 core/policy/artifacts/

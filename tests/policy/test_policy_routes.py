@@ -6,6 +6,7 @@ from core.api_server.routes import policy_routes as routes
 from core.policy import PreflightIntent, PreflightResult
 from core import session as scan_session
 from core.session import lifecycle
+from core.policy.agent_backends import AgentBackend
 
 
 def _run(coro):
@@ -42,6 +43,7 @@ def test_attestation_payload_records_expected_marker() -> None:
         intent=intent,
         marker="expected-marker",
         raw_output="marker: observed-marker\nrole: executor\nmodel: gpt-5.6-luna\neffort: medium",
+        status="mismatch",
         actual_role="executor",
         actual_model="gpt-5.6-luna",
         actual_effort="medium",
@@ -92,6 +94,33 @@ def test_api_run_policy_preflight_manual_mode_records_state(tmp_path, monkeypatc
     assert body["ok"] is True
     assert body["mode"] == "manual"
     assert body["status"] == "match"
+    assert body["preflight"]["marker"] == "m1"
+    assert body["policy_preflight_state"]["roles"] == ["executor"]
+
+
+def test_api_run_policy_preflight_manual_mode_uses_embedded_marker_when_marker_omitted(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(routes, "_POLICY_LEDGER_DB", tmp_path / "policy_task_ledger.sqlite")
+    monkeypatch.setattr(lifecycle, "_POLICY_LEDGER_DB", tmp_path / "policy_task_ledger.sqlite")
+    monkeypatch.setenv("SMITH_DISABLE_SESSION_PRELIGHT", "1")
+
+    scan_session.start("https://example.local", depth="standard", scope=[])
+
+    response = _run(
+        routes.api_run_policy_preflight(
+            {
+                "role": "executor",
+                "model": "gpt-5.6-luna",
+                "effort": "medium",
+                "raw_output": "marker: m2\nrole: executor\nmodel: gpt-5.6-luna\neffort: medium\nsandbox: read_only\n",
+            }
+        )
+    )
+    body = json.loads(response.body)
+    assert body["ok"] is True
+    assert body["mode"] == "manual"
+    assert body["preflight"]["marker"] == "m2"
+    assert body["preflight"]["marker_expected"] == "m2"
+    assert body["policy_preflight_state"]["status"] == "match"
 
     policy = scan_session.get()["policy"]
     assert policy["preflight"]["executor"]["mode"] == "manual"
@@ -137,3 +166,83 @@ def test_api_run_policy_preflight_auto_mode_records_policy_state(tmp_path, monke
     assert body["mode"] == "auto"
     assert body["policy_preflight_state"]["mode"] == "auto"
     assert body["preflight"]["status"] == "match"
+
+
+def test_api_policy_launch_plan_returns_authorized_contract(monkeypatch) -> None:
+    monkeypatch.setattr(scan_session, "load_from_disk", lambda force=True: None)
+
+    def fake_resolve_launch_contract(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "launch_authorized": True,
+            "enabled": True,
+            "role": "executor",
+            "route": "direct",
+            "route_hint": "direct",
+            "selected_backend": AgentBackend.NATIVE.value,
+            "fallback_backend": None,
+            "requires_approval": False,
+            "fail_closed": False,
+            "block_delegation": False,
+            "reason": "tests",
+            "status": "authorized",
+            "action": "authorized",
+            "command": None,
+            "command_path": "native_subagent",
+            "requires_runtime_proxy": True,
+        }
+
+    monkeypatch.setattr(scan_session, "resolve_launch_contract", fake_resolve_launch_contract)
+
+    response = _run(
+        routes.api_policy_launch_plan({
+            "role": "executor",
+            "model": "gpt-5.6-luna",
+            "effort": "medium",
+        })
+    )
+    body = json.loads(response.body)
+    assert body["ok"] is True
+    decision = body["decision"]
+    assert decision["status"] == "authorized"
+    assert decision["launch_authorized"] is True
+    assert decision["route"] == "direct"
+
+
+def test_api_policy_launch_plan_blocks_when_approval_or_fail_closed(monkeypatch) -> None:
+    monkeypatch.setattr(scan_session, "load_from_disk", lambda force=True: None)
+
+    def fake_resolve_launch_contract(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "launch_authorized": False,
+            "enabled": True,
+            "role": "executor",
+            "route": "direct",
+            "route_hint": "direct",
+            "selected_backend": AgentBackend.NATIVE.value,
+            "fallback_backend": None,
+            "requires_approval": True,
+            "fail_closed": False,
+            "block_delegation": False,
+            "reason": "tests",
+            "status": "needs_approval",
+            "action": "needs_approval",
+            "command": None,
+            "command_path": "native_subagent",
+            "requires_runtime_proxy": True,
+        }
+
+    monkeypatch.setattr(scan_session, "resolve_launch_contract", fake_resolve_launch_contract)
+    response = _run(
+        routes.api_policy_launch_plan({
+            "role": "executor",
+            "model": "gpt-5.6-luna",
+            "effort": "medium",
+        })
+    )
+    body = json.loads(response.body)
+    assert response.status_code == 423
+    assert body["ok"] is False
+    assert body["enabled"] is True
+    assert body["decision"]["action"] == "needs_approval"

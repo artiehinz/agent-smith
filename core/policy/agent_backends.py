@@ -26,9 +26,13 @@ class BackendDecision:
 def _coerce_explicit_unavailable(
     role: str,
     decision: BackendDecision,
+    *,
+    explicit_worker_available: bool,
 ) -> BackendDecision:
     """If explicit execution is required but unavailable, fail-closed on native with approval."""
     if decision.selected_backend != AgentBackend.EXPLICIT:
+        return decision
+    if explicit_worker_available:
         return decision
     return BackendDecision(
         role=role,
@@ -74,6 +78,7 @@ def choose_backend(
                         f"for deterministic model={intended_model} effort={intended_effort}."
                     ),
                 ),
+                explicit_worker_available=explicit_worker_available,
             )
         return BackendDecision(
             role=role,
@@ -108,6 +113,7 @@ def choose_backend(
                     "use explicit worker for model/effort control."
                 ),
             ),
+            explicit_worker_available=explicit_worker_available,
         )
 
     return _coerce_explicit_unavailable(
@@ -123,6 +129,7 @@ def choose_backend(
                 f"(preflight status={attestation.status})."
             ),
         ),
+        explicit_worker_available=explicit_worker_available,
     )
 
 

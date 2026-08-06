@@ -24,6 +24,9 @@
     <div id="policy-tasks" class="card-empty" style="margin-top: 12px;">
       Policy task ledger will appear here.
     </div>
+    <div id="policy-task-detail" class="card-empty" style="margin-top: 8px;">
+      Policy task event telemetry will appear here.
+    </div>
 
     <div class="policy-task-filters" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
       <label>Status
@@ -55,6 +58,9 @@
       </label>
       <label>Limit
         <input id="policy-task-limit" type="number" min="1" max="250" value="12" />
+      </label>
+      <label>Offset
+        <input id="policy-task-offset" type="number" min="0" value="0" />
       </label>
       <button type="button" onclick="pollPolicy()">Filter tasks</button>
     </div>
