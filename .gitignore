@@ -1,0 +1,30 @@
+# Local policy/bootstrap artifacts (keep checked out locally, out of commits)
+references/
+skills/
+.codex-control/
+tools/policy/artifacts/
+core/policy/__pending__/
+core/policy/artifacts/
+
+# Python build/runtime artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.venv/
+venv/
+env/
+
+# Tool and build outputs
+node_modules/
+dist/
+build/
+*.egg-info/
+coverage/
+.coverage
+.coverage.*

@@ -14,8 +14,10 @@ did, keeping every name patchable without introducing an import cycle.
 """
 from __future__ import annotations
 
+import logging
 import json
 import os
+import shutil
 import time
 import uuid
 from dataclasses import asdict
@@ -24,9 +26,46 @@ from datetime import datetime, timezone
 import core.session as _sess
 from core import paths as _paths
 from core import cost as cost_tracker
-from core.policy import RouteContext, classify_route, route_token_budget
+from core.policy import (
+    ModelAttestation,
+    ModelSpec,
+    PreflightIntent,
+    RouteContext,
+    attestation_payload,
+    classify_route,
+    choose_backend,
+    explicit_worker_args,
+    generate_preflight_marker,
+    init_ledger,
+    record_task_event,
+    route_token_budget,
+    run_preflight_probe,
+    should_disable_delegation,
+    upsert_task,
+)
 
 _POLICY_LEDGER_DB = _paths.REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+_SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES = (
+    "executor",
+    "tester",
+    "reviewer",
+    "security review",
+    "explorer",
+)
+_SESSION_PREFLIGHT_TARGETS_ENV = "SMITH_POLICY_PRELIGHT_ROLES"
+_SESSION_PRELIGHT_DISABLE_AUTO = "SMITH_DISABLE_SESSION_PRELIGHT"
+
+_DEFAULT_PRELIGHT_MODEL = "gpt-5.6-luna"
+_DEFAULT_PRELIGHT_EFFORT_BY_PROFILE = {
+    "quick": "low",
+    "standard": "medium",
+    "thorough": "high",
+    "recon": "medium",
+}
+
+_LOG = logging.getLogger(__name__)
+
+_ALLOWED_ROUTES = {"direct", "structured", "parallel"}
 
 
 def _record_policy_completion_event(
@@ -76,6 +115,178 @@ def _record_policy_completion_event(
         )
     except Exception:
         pass
+
+
+def _normalize_pref_bool(raw: object, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _normalize_route(raw: object | None) -> str:
+    value = str(raw or "").strip().lower()
+    return value if value in _ALLOWED_ROUTES else "direct"
+
+
+def _policy_preflight_targets(scan_mode: str | None) -> tuple[str, ...]:
+    if _normalize_pref_bool(os.environ.get(_SESSION_PRELIGHT_DISABLE_AUTO), default=False):
+        return ()
+
+    if (scan_mode or "").strip().lower() == "benchmark":
+        explicit = os.environ.get(_SESSION_PREFLIGHT_TARGETS_ENV, "")
+        explicit_roles = tuple(
+            role.strip().lower() for role in explicit.split(",") if role.strip()
+        )
+        if explicit_roles:
+            return tuple(r.replace("-", " ") for r in explicit_roles)
+        return _SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES
+    return ()
+
+
+def _resolve_preflight_intent(role: str, model_profile: str | None) -> PreflightIntent:
+    key = role.replace("-", "_").replace(" ", "_").upper()
+    model = (
+        os.environ.get(f"SMITH_POLICY_PRELIGHT_MODEL_{key}")
+        or os.environ.get("SMITH_POLICY_PRELIGHT_MODEL")
+        or _DEFAULT_PRELIGHT_MODEL
+    )
+    effort_default = _DEFAULT_PRELIGHT_EFFORT_BY_PROFILE.get(
+        (model_profile or "").lower(),
+        "medium",
+    )
+    effort = (
+        os.environ.get(f"SMITH_POLICY_PRELIGHT_EFFORT_{key}")
+        or os.environ.get("SMITH_POLICY_PRELIGHT_EFFORT")
+        or effort_default
+    )
+    sandbox = (
+        os.environ.get(f"SMITH_POLICY_PRELIGHT_SANDBOX_{key}")
+        or os.environ.get("SMITH_POLICY_PRELIGHT_SANDBOX", "read_only")
+    )
+    return PreflightIntent(role=role, model=model, effort=effort, sandbox=sandbox)
+
+
+def _build_policy_attestation(intent: PreflightIntent, result) -> ModelAttestation:
+    actual = (
+        ModelSpec(name=result.actual_model, effort=result.actual_effort)
+        if result.actual_model
+        else None
+    )
+    return ModelAttestation(role=intent.role, intended=ModelSpec(name=intent.model, effort=intent.effort), actual=actual)
+
+
+def _build_backend_decision_payload(role: str, decision, command: list[str] | None) -> dict[str, object]:
+    return {
+        "role": role,
+        "selected_backend": decision.selected_backend.value,
+        "fallback_backend": decision.fallback_backend.value if decision.fallback_backend else None,
+        "fail_closed": decision.fail_closed,
+        "requires_approval": decision.requires_approval,
+        "reason": decision.reason,
+        "command": command,
+    }
+
+
+def _init_policy_task_record(policy: dict[str, object], scan_mode: str | None) -> str:
+    task_id = str(policy.get("ledger_id") or _sess._current.get("id") or uuid.uuid4())
+    route = str(policy.get("route") or "direct")
+    route_hint = policy.get("route_hint")
+    try:
+        init_ledger(_POLICY_LEDGER_DB)
+        upsert_task(
+            _POLICY_LEDGER_DB,
+            task_id=task_id,
+            route=route,
+            owner_role="orchestrator",
+            status="open",
+            route_hint=str(route_hint) if route_hint else None,
+            metadata={
+                "scan_mode": scan_mode,
+                "route_hint": route_hint,
+                "depth": _sess._current.get("depth") if isinstance(_sess._current, dict) else None,
+                "scope": (_sess._current.get("scope") if isinstance(_sess._current, dict) else None),
+            },
+        )
+        record_task_event(
+            _POLICY_LEDGER_DB,
+            task_id=task_id,
+            kind="started",
+            payload={"route": route, "route_hint": route_hint, "scan_mode": scan_mode},
+        )
+        policy["ledger_id"] = task_id
+        return task_id
+    except Exception:
+        _LOG.exception("failed to initialize policy task entry")
+        return task_id
+
+
+def _run_session_preflight_auto(policy: dict[str, object], scan_mode: str | None, model_profile: str | None) -> tuple[dict, dict]:
+    preflight_by_role: dict[str, dict[str, object]] = {}
+    backend_by_role: dict[str, dict[str, object]] = {}
+    explicit_worker_available = shutil.which("codex") is not None
+    if not policy or not isinstance(policy, dict):
+        return preflight_by_role, backend_by_role
+    roles = _policy_preflight_targets(scan_mode)
+    if not roles:
+        return preflight_by_role, backend_by_role
+
+    for role in roles:
+        try:
+            intent = _resolve_preflight_intent(role, model_profile)
+            marker = generate_preflight_marker()
+            result = run_preflight_probe(intent, marker)
+            attestation = _build_policy_attestation(intent, result)
+            decision = choose_backend(
+                role=role,
+                intended_model=intent.model,
+                intended_effort=intent.effort,
+                attestation=attestation,
+                explicit_worker_available=explicit_worker_available,
+            )
+            command = explicit_worker_args(model=intent.model, effort=intent.effort)
+            preflight_payload = attestation_payload(result, marker)
+            backend_payload = _build_backend_decision_payload(role, decision, command)
+            backend_payload["requires_approval"] = decision.requires_approval
+            backend_payload["fail_closed"] = should_disable_delegation(
+                decision.selected_backend,
+                attestation=attestation,
+            ) or decision.fail_closed
+            backend_payload["command"] = command
+            backend_payload["mode"] = "auto"
+            preflight_by_role[role] = preflight_payload
+            backend_by_role[role] = backend_payload
+        except Exception:
+            _LOG.exception("failed auto session preflight for role=%s", role)
+            marker = generate_preflight_marker()
+            preflight_by_role[role] = {
+                "status": "missing_actual",
+                "marker_expected": marker,
+                "marker": marker,
+                "intent": {"role": role, "model": _DEFAULT_PRELIGHT_MODEL, "effort": _DEFAULT_PRELIGHT_EFFORT_BY_PROFILE.get((model_profile or "").lower(), "medium"), "sandbox": "read_only"},
+                "actual": {"role": None, "model": None, "effort": None, "sandbox": "read_only"},
+                "parse_error": "preflight failed",
+                "raw_output": "",
+                "mode": "auto",
+            }
+            backend_by_role[role] = {
+                "role": role,
+                "selected_backend": "native_subagent",
+                "fallback_backend": None,
+                "fail_closed": True,
+                "requires_approval": False,
+                "reason": "session auto preflight failed",
+                "mode": "auto",
+                "command": [],
+            }
+    return preflight_by_role, backend_by_role
 
 
 def _finalize_terminal_session(
@@ -239,6 +450,161 @@ def _default_route_policy(depth: str, scope: list[str] | None) -> dict[str, obje
     }
 
 
+def policy_launch_plan(
+    role: str,
+    intended_model: str,
+    intended_effort: str,
+    *,
+    explicit_worker_available: bool = True,
+) -> dict[str, object]:
+    """Build a structured launch decision for a role using active policy state."""
+    if not _sess._current:
+        return {"enabled": False, "reason": "no active session"}
+    if not isinstance(role, str) or not role.strip():
+        return {"enabled": False, "reason": "invalid role"}
+
+    normalized_role = role.strip().lower()
+    policy = _sess._current.get("policy")
+    route = "direct"
+    preflight_payload = None
+    route_hint = None
+    if isinstance(policy, dict):
+        route = _normalize_route(policy.get("route"))
+        raw_route_hint = policy.get("route_hint")
+        if raw_route_hint is not None:
+            route_hint = str(raw_route_hint)
+        preflight_payload = policy.get("preflight")
+        if isinstance(preflight_payload, dict):
+            preflight_payload = preflight_payload.get(normalized_role)
+
+    if not isinstance(preflight_payload, dict):
+        preflight_payload = {}
+
+    intent_payload = preflight_payload.get("intent", {})
+    actual_payload = preflight_payload.get("actual", {})
+    if (
+        isinstance(intent_payload, dict)
+        and intent_payload.get("model")
+        and intent_payload.get("effort")
+    ):
+        intended_spec = ModelSpec(
+            name=str(intent_payload["model"]),
+            effort=str(intent_payload["effort"]),
+        )
+        actual_spec = (
+            ModelSpec(name=str(actual_payload["model"]), effort=str(actual_payload["effort"]))
+            if isinstance(actual_payload, dict) and actual_payload.get("model") and actual_payload.get("effort")
+            else None
+        )
+        attestation = ModelAttestation(role=normalized_role, intended=intended_spec, actual=actual_spec)
+    else:
+        intended_spec = ModelSpec(name=intended_model, effort=intended_effort)
+        attestation = ModelAttestation(
+            role=normalized_role,
+            intended=intended_spec,
+            actual=(
+                ModelSpec(name=str(actual_payload.get("model")), effort=str(actual_payload.get("effort")))
+                if isinstance(actual_payload, dict) and actual_payload.get("model") and actual_payload.get("effort")
+                else None
+            ),
+        )
+
+    decision = choose_backend(
+        normalized_role,
+        intended_model=intended_spec.name,
+        intended_effort=intended_spec.effort,
+        attestation=attestation,
+        explicit_worker_available=explicit_worker_available,
+    )
+    should_block = should_disable_delegation(
+        decision.selected_backend,
+        attestation=attestation,
+    )
+    payload = {
+        "enabled": True,
+        "role": normalized_role,
+        "route": route,
+        "route_hint": route_hint,
+        "selected_backend": decision.selected_backend.value,
+        "fallback_backend": decision.fallback_backend.value if decision.fallback_backend else None,
+        "requires_approval": decision.requires_approval,
+        "fail_closed": decision.fail_closed,
+        "block_delegation": should_block,
+        "reason": decision.reason,
+    }
+    if decision.selected_backend.value == "explicit_codex_exec":
+        payload["command"] = explicit_worker_args(
+            model=intended_spec.name,
+            effort=intended_spec.effort,
+        )
+    else:
+        payload["command"] = None
+    return payload
+
+
+def evaluate_policy_launch(
+    role: str,
+    intended_model: str,
+    intended_effort: str,
+    *,
+    explicit_worker_available: bool = True,
+) -> dict[str, object]:
+    """Return a launch decision and apply delegation policy side-effects."""
+    decision = policy_launch_plan(
+        role,
+        intended_model,
+        intended_effort,
+        explicit_worker_available=explicit_worker_available,
+    )
+    if not decision.get("enabled", False):
+        return decision
+
+    role_key = str(decision["role"])
+    status = "authorized"
+    event = "delegation_authorized"
+    if decision.get("block_delegation"):
+        status = "blocked"
+        event = "delegation_blocked"
+    elif decision.get("requires_approval"):
+        status = "needs_approval"
+        event = "delegation_needs_approval"
+
+    decision["status"] = status
+    decision["action"] = status
+    if isinstance(_sess._current, dict):
+        policy = _sess._current.get("policy")
+        if isinstance(policy, dict):
+            decisions = dict(policy.get("backend_decisions") or {})
+            decisions[role_key] = {
+                "role": role_key,
+                "route": decision.get("route"),
+                "route_hint": decision.get("route_hint"),
+                "selected_backend": decision.get("selected_backend"),
+                "fallback_backend": decision.get("fallback_backend"),
+                "requires_approval": decision.get("requires_approval"),
+                "fail_closed": decision.get("fail_closed"),
+                "reason": decision.get("reason"),
+                "command": decision.get("command"),
+                "status": status,
+                "mode": "launch",
+            }
+            policy["backend_decisions"] = decisions
+
+            task_id = policy.get("ledger_id")
+            if isinstance(task_id, str) and task_id:
+                try:
+                    record_task_event(
+                        _POLICY_LEDGER_DB,
+                        task_id=task_id,
+                        kind=event,
+                        payload=dict(decision),
+                    )
+                except Exception:
+                    _LOG.exception("failed to record policy launch event")
+            _sess._flush()
+    return decision
+
+
 def start(
     target:           str,
     depth:            str        = "standard",
@@ -361,6 +727,54 @@ def start(
             "source":      "interactive_mcp",
         }
         _sess._persist_smith_caller(caller)
+
+    # Materialize policy telemetry and task ledger baseline before the first
+    # poll/update cycle can observe missing policy IDs.
+    policy = _sess._current.get("policy")
+    if isinstance(policy, dict):
+        _init_policy_task_record(policy, scan_mode=scan_mode)
+        if _policy_preflight_targets(scan_mode):
+            preflight_results, decision_results = _run_session_preflight_auto(
+                policy,
+                scan_mode=scan_mode,
+                model_profile=resolved_profile,
+            )
+            if preflight_results:
+                policy["preflight"] = preflight_results
+            if decision_results:
+                policy["backend_decisions"] = decision_results
+            policy["policy_preflight_state"] = {
+                "mode": "session_start",
+                "status": "completed",
+                "scan_mode": scan_mode,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "roles": list(preflight_results.keys()),
+            }
+            if preflight_results and isinstance(policy.get("repair_loop"), dict):
+                policy["repair_loop"]["cycle"] = 0
+            elif "repair_loop" in policy:
+                policy["repair_loop"] = {"cycle": 0, "max_cycles": 2}
+            task_id = policy.get("ledger_id")
+            if isinstance(task_id, str) and task_id:
+                for role, decision_payload in decision_results.items():
+                    payload = {
+                        "mode": "session_start",
+                        "scan_mode": scan_mode,
+                        "role": role,
+                        "status": preflight_results.get(role, {}).get("status", "unknown"),
+                        "result": preflight_results.get(role, {}),
+                        "decision": decision_payload,
+                        "repair_cycle": policy.get("repair_loop", {}).get("cycle") if isinstance(policy.get("repair_loop"), dict) else 0,
+                    }
+                    try:
+                        record_task_event(
+                            _POLICY_LEDGER_DB,
+                            task_id=task_id,
+                            kind="preflight",
+                            payload=payload,
+                        )
+                    except Exception:
+                        _LOG.exception("failed to record session preflight event")
     _sess._flush()
     return _sess._current
 

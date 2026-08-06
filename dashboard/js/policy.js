@@ -2,12 +2,31 @@ let _policy = null;
 let _policyTasks = null;
 let _policyPreflight = null;
 let _policyBackendDecisions = null;
+let _policyPreflightState = null;
+
+function _taskQueryString() {
+  const params = new URLSearchParams();
+  const status = (document.getElementById('policy-task-status')?.value || '').trim();
+  const owner = (document.getElementById('policy-task-owner')?.value || '').trim();
+  const route = (document.getElementById('policy-task-route')?.value || '').trim();
+  const since = (document.getElementById('policy-task-since')?.value || '').trim();
+  const until = (document.getElementById('policy-task-until')?.value || '').trim();
+  const limit = parseInt((document.getElementById('policy-task-limit')?.value || '12').trim(), 10);
+
+  if (status) params.set('status', status);
+  if (owner) params.set('owner_role', owner);
+  if (route) params.set('route', route);
+  if (since) params.set('since', since);
+  if (until) params.set('until', until);
+  if (Number.isFinite(limit) && limit > 0) params.set('limit', String(limit));
+  return params.toString() ? `?${params.toString()}` : '';
+}
 
 async function pollPolicy() {
   try {
     const [policyRes, tasksRes, preflightRes] = await Promise.all([
       fetch('/api/policy'),
-      fetch('/api/policy/tasks'),
+      fetch(`/api/policy/tasks${_taskQueryString()}`),
       fetch('/api/policy/preflight'),
     ]);
 
@@ -18,6 +37,7 @@ async function pollPolicy() {
     const preflightPayload = preflightRes.ok ? await preflightRes.json() : {};
     _policyPreflight = preflightPayload && preflightPayload.ok ? (preflightPayload.preflight || {}) : {};
     _policyBackendDecisions = preflightPayload && preflightPayload.ok ? (preflightPayload.backend_decisions || {}) : {};
+    _policyPreflightState = preflightPayload && preflightPayload.ok ? (preflightPayload.policy_preflight_state || null) : null;
 
     _renderPolicyTab();
   } catch (err) {
@@ -29,15 +49,20 @@ async function pollPolicy() {
 function _policyStatusIcon(status) {
   if (status === 'complete') return '[done]';
   if (status === 'in_progress' || status === 'running') return '[active]';
-  if (status === 'incomplete_with_unresolved_blockers') return '[warn]';
+  if (status === 'incomplete_with_unresolved_blockers' || status === 'limit_reached') return '[warn]';
   return '[idle]';
 }
 
 function _safeRenderPolicySummary(sessionPolicy) {
   const el = document.getElementById('policy-summary');
+  const routeEl = document.getElementById('policy-route-current');
+  const summaryRouteEl = document.getElementById('policy-route-summary');
   if (!el) return;
+
   if (!sessionPolicy || !Object.keys(sessionPolicy).length) {
     el.textContent = 'No policy blob on this session yet.';
+    if (routeEl) routeEl.textContent = '';
+    if (summaryRouteEl) summaryRouteEl.textContent = '';
     return;
   }
 
@@ -46,6 +71,8 @@ function _safeRenderPolicySummary(sessionPolicy) {
   const routeHint = sessionPolicy.route_hint || 'n/a';
   const override = sessionPolicy.override_applied ? 'yes' : 'no';
   const engine = sessionPolicy.policy_engine || 'n/a';
+  const resetApplied = sessionPolicy.route_reset_applied ? 'yes' : 'no';
+  const tokenBudget = sessionPolicy.token_budget || {};
 
   el.innerHTML = `
     <div><strong>Route:</strong> ${route}</div>
@@ -54,10 +81,13 @@ function _safeRenderPolicySummary(sessionPolicy) {
     <div><strong>Override applied:</strong> ${override}</div>
     <div><strong>Engine:</strong> ${engine}</div>
     <div><strong>Rationale:</strong> ${(sessionPolicy.rationale || []).join(', ') || 'n/a'}</div>
+    <div><strong>Token budget:</strong> task hard=${tokenBudget.task_hard || 'n/a'}, worker hard=${tokenBudget.worker_hard || 'n/a'}</div>
+    <div><strong>Route reset last attempt:</strong> ${resetApplied}</div>
   `;
 
-  const current = document.getElementById('policy-route-current');
-  if (current) current.textContent = `Current route: ${route}`;
+  const routeText = `Current route: ${route}` + (routeHint !== 'n/a' ? ` (hint: ${routeHint})` : '');
+  if (routeEl) routeEl.textContent = `Current: ${route}`;
+  if (summaryRouteEl) summaryRouteEl.textContent = routeText;
 
   const select = document.getElementById('policy-route-select');
   if (select && [...select.options].every(o => o.value !== route)) return;
@@ -84,11 +114,14 @@ function _safeRenderPolicyTasks(policyTasks) {
     el.textContent = 'No tasks recorded yet.';
     return;
   }
-  const body = policyTasks.slice(0, 12).map((task) => {
+
+  const maxRows = 12;
+  const body = policyTasks.slice(0, maxRows).map((task) => {
     const status = task.status || 'unknown';
     const route = task.route || 'unknown';
     const owner = task.owner_role || 'unknown';
-    return `<div><strong>${_policyStatusIcon(status)} ${task.task_id}</strong> - route=${route} owner=${owner} status=${status}</div>`;
+    const hint = task.route_hint || 'n/a';
+    return `<div><strong>${_policyStatusIcon(status)} ${task.task_id}</strong> - route=${route} owner=${owner} status=${status} hint=${hint}</div>`;
   }).join('');
   el.innerHTML = body;
 }
@@ -105,18 +138,35 @@ function _renderPolicyPreflight(summary) {
 
   const rows = Object.entries(summary).map(([role, result]) => {
     const status = result.status || 'unknown';
-    const intended = result.intended || {};
+    const mode = result.mode || 'auto';
+    const intended = result.intent || {};
     const actual = result.actual || {};
     const mismatch = status !== 'match';
+    const parseError = result.parse_error || '';
     return `<div>
-      <div><strong>${role}</strong> - status: ${status} ${mismatch ? '(warning)' : ''}</div>
+      <div><strong>${role}</strong> - mode: ${mode}, status: ${status} ${mismatch ? '(warning)' : ''}</div>
       <div>Intended: ${intended.model || 'n/a'} / ${intended.effort || 'n/a'} (${intended.sandbox || 'read_only'})</div>
       <div>Actual: ${actual.model || 'n/a'} / ${actual.effort || 'n/a'} (${actual.sandbox || 'n/a'})</div>
-      ${result.parse_error ? `<div>Parse error: ${result.parse_error}</div>` : ''}
+      ${parseError ? `<div>Parse error: ${parseError}</div>` : ''}
+      <div>Marker expected: ${result.marker_expected || 'n/a'} received: ${result.marker || 'n/a'}</div>
     </div>`;
   }).join('<hr/>');
   el.innerHTML = `<strong>Model attestation:</strong><div style=\"margin-top:8px;\">${rows}</div>`;
   if (msgEl) msgEl.textContent = `Loaded ${Object.keys(summary).length} preflight role(s).`;
+}
+
+function _renderPolicyPreflightState(state) {
+  const stateEl = document.getElementById('policy-preflight-state');
+  if (!stateEl) return;
+  if (!state || typeof state !== 'object' || !Object.keys(state).length) {
+    stateEl.textContent = 'Preflight state not yet initialized.';
+    return;
+  }
+  const mode = state.mode || 'n/a';
+  const status = state.status || 'unknown';
+  const roles = Array.isArray(state.roles) ? state.roles.join(', ') : 'n/a';
+  const updatedAt = state.updated_at || 'n/a';
+  stateEl.textContent = `Preflight state: mode=${mode}, status=${status}, roles=[${roles}], updated=${updatedAt}`;
 }
 
 function _renderPolicyBackendDecisions(decisions) {
@@ -129,7 +179,12 @@ function _renderPolicyBackendDecisions(decisions) {
   const rows = Object.entries(decisions).map(([role, d]) => {
     const backend = d.selected_backend || 'n/a';
     const failClosed = d.fail_closed ? 'yes' : 'no';
-    return `<div><strong>${role}</strong>: ${backend} (fail_closed=${failClosed})</div>`;
+    const requiresApproval = d.requires_approval ? 'yes' : 'no';
+    const fallback = d.fallback_backend || 'none';
+    const mode = d.mode || 'n/a';
+    const status = d.status || 'n/a';
+    const command = Array.isArray(d.command) ? d.command.join(' ') : 'n/a';
+    return `<div><strong>${role}</strong>: ${backend} (mode=${mode}, status=${status}, fallback=${fallback}, fail_closed=${failClosed}, requires_approval=${requiresApproval}, command=${command})</div>`;
   }).join('');
   el.innerHTML = `<strong>Backend decisions:</strong><div style=\"margin-top:8px;\">${rows}</div>`;
 }
@@ -147,9 +202,26 @@ function _populatePreflightDefaults() {
 function _fillPreflightHintFromRole() {
   const el = document.getElementById('policy-pref-role');
   const out = document.getElementById('policy-pref-hint');
+  const auto = document.getElementById('policy-pref-auto');
   if (!el || !out) return;
   const role = el.value || 'executor';
-  out.textContent = `Running preflight for role=${role}. Paste probe output into the box.`;
+  const autoText = auto?.checked ? 'auto-run will execute probe if output is blank' : 'paste raw output below';
+  out.textContent = `Running preflight for role=${role}. ${autoText}.`;
+}
+
+function _renderPolicyRepairLoop(policy) {
+  const statusEl = document.getElementById('policy-repair-status');
+  const cycleEl = document.getElementById('policy-repair-cycle');
+  const maxEl = document.getElementById('policy-repair-max-cycles');
+  if (!statusEl || !cycleEl || !maxEl) return;
+  const repair = policy && typeof policy.repair_loop === 'object' && policy.repair_loop ? policy.repair_loop : {};
+  const cycle = repair.cycle == null ? 0 : repair.cycle;
+  const maxCycles = repair.max_cycles == null ? 2 : repair.max_cycles;
+  statusEl.textContent = `current=${cycle} / max=${maxCycles}`;
+  if (cycleEl.value === '') cycleEl.value = String(cycle);
+  if (maxEl.value === '') maxEl.value = String(maxCycles);
+  cycleEl.value = String(cycle);
+  maxEl.value = String(maxCycles);
 }
 
 function _renderPolicyTab() {
@@ -158,8 +230,10 @@ function _renderPolicyTab() {
   _safeRenderPolicyTasks(_policyTasks);
   _renderPolicyPreflight(_policyPreflight);
   _renderPolicyBackendDecisions(_policyBackendDecisions);
+  _renderPolicyPreflightState(_policyPreflightState);
   _populatePreflightDefaults();
   _fillPreflightHintFromRole();
+  _renderPolicyRepairLoop(_policy || {});
 }
 
 async function applyPolicyRoute() {
@@ -200,6 +274,7 @@ async function runPolicyPreflight() {
   const sandboxEl = document.getElementById('policy-pref-sandbox');
   const outputEl = document.getElementById('policy-pref-output');
   const msgEl = document.getElementById('policy-pref-status');
+  const autoEl = document.getElementById('policy-pref-auto');
 
   if (!roleEl || !modelEl || !effortEl || !outputEl) return;
   const role = (roleEl.value || '').trim();
@@ -207,29 +282,33 @@ async function runPolicyPreflight() {
   const effort = (effortEl.value || '').trim();
   const sandbox = (sandboxEl?.value || '').trim() || 'read_only';
   const output = (outputEl.value || '').trim();
+  const auto = autoEl ? autoEl.checked : true;
   if (!role || !model || !effort) {
     if (msgEl) msgEl.textContent = 'role/model/effort are required';
     return;
   }
-  if (!output) {
-    if (msgEl) msgEl.textContent = 'Paste probe output to run preflight.';
+  if (!auto && !output) {
+    if (msgEl) msgEl.textContent = 'Paste probe output or enable auto-run.';
     return;
   }
 
   if (msgEl) msgEl.textContent = 'Submitting...';
+  const payload = {
+    role,
+    model,
+    effort,
+    sandbox,
+  };
+  if (output) {
+    payload.raw_output = output;
+  }
   try {
     const r = await fetch('/api/policy/preflight', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        role,
-        model,
-        effort,
-        sandbox,
-        raw_output: output,
-      }),
+      body: JSON.stringify(payload),
     });
     const body = await r.json().catch(() => ({}));
     if (!r.ok || !body.ok) {
@@ -249,6 +328,48 @@ async function runPolicyPreflight() {
   }
 }
 
+async function updatePolicyRepairLoop() {
+  const cycleEl = document.getElementById('policy-repair-cycle');
+  const maxCyclesEl = document.getElementById('policy-repair-max-cycles');
+  const msgEl = document.getElementById('policy-repair-message');
+  if (!cycleEl || !maxCyclesEl) return;
+  const cycle = cycleEl.value.trim();
+  const maxCycles = maxCyclesEl.value.trim();
+  if (!cycle && !maxCycles) {
+    if (msgEl) msgEl.textContent = 'provide cycle and/or max_cycles';
+    return;
+  }
+
+  const payload = {};
+  if (cycle) payload.cycle = parseInt(cycle, 10);
+  if (maxCycles) payload.max_cycles = parseInt(maxCycles, 10);
+
+  if (msgEl) msgEl.textContent = 'Updating...';
+  try {
+    const r = await fetch('/api/policy/repair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) {
+      if (msgEl) msgEl.textContent = `Failed: ${body.error || 'request failed'}`;
+      return;
+    }
+    if (msgEl) msgEl.textContent = `Repair cycle updated (${body.repair_loop?.cycle ?? 'n/a'} / ${body.repair_loop?.max_cycles ?? 'n/a'})`;
+    if (_policy && _policy.repair_loop && body.repair_loop) {
+      _policy.repair_loop = body.repair_loop;
+    }
+    _renderPolicyRepairLoop(_policy || {});
+  } catch (err) {
+    if (msgEl) msgEl.textContent = `Failed: ${err.message || 'request failed'}`;
+  } finally {
+    setTimeout(() => {
+      if (msgEl) msgEl.textContent = '';
+    }, 2500);
+  }
+}
+
 function policyPrefRoleChanged() {
   _fillPreflightHintFromRole();
 }
@@ -256,4 +377,5 @@ function policyPrefRoleChanged() {
 window.applyPolicyRoute = applyPolicyRoute;
 window.runPolicyPreflight = runPolicyPreflight;
 window.policyPrefRoleChanged = policyPrefRoleChanged;
+window.updatePolicyRepairLoop = updatePolicyRepairLoop;
 window._policy = _policy;
