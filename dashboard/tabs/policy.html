@@ -1,34 +1,47 @@
 <section class="tab-content" id="tab-policy">
-  <div class="panel policy-panel">
-    <h2>Policy</h2>
+  <div class="panel policy-panel policy-tab-shell">
+    <div>
+      <h2>Policy</h2>
+      <div class="tab-meta">Route decisions, backend telemetry, preflight evidence, and repair controls.</div>
+    </div>
 
-    <div class="policy-overview" style="margin-bottom: 12px;">
-      <div id="policy-summary" class="card-empty">
-        Policy route and model information will appear here.
+    <div class="panel-grid two-col policy-overview">
+      <div class="panel-card">
+        <h3>Policy summary</h3>
+        <div id="policy-summary" class="card-empty">Policy route and model information will appear here.</div>
+        <div id="policy-route-summary" class="tab-meta" style="margin-top: 8px;"></div>
       </div>
-      <div id="policy-route-summary" style="margin-top: 8px;"></div>
+      <div class="panel-card">
+        <h3>Current route state</h3>
+        <div id="policy-route-current" class="card-empty"></div>
+        <div style="margin-top: 10px;">
+          <div class="policy-route-controls">
+            <label for="policy-route-select">Route override</label>
+            <select id="policy-route-select">
+              <option value="direct">direct</option>
+              <option value="structured">structured</option>
+              <option value="parallel">parallel</option>
+            </select>
+            <button id="policy-route-apply" onclick="applyPolicyRoute()" type="button">Apply</button>
+            <span id="policy-route-message" class="muted-note"></span>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <div class="policy-override" style="margin: 0 0 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-      <label for="policy-route-select">Route</label>
-      <select id="policy-route-select">
-        <option value="direct">direct</option>
-        <option value="structured">structured</option>
-        <option value="parallel">parallel</option>
-      </select>
-      <button id="policy-route-apply" onclick="applyPolicyRoute()" type="button">Apply</button>
-      <span id="policy-route-message"></span>
-      <span id="policy-route-current" style="margin-left: auto;"></span>
+    <div class="panel-grid two-col">
+      <div class="panel-card">
+        <h3>Task ledger</h3>
+        <div id="policy-tasks" class="card-empty">Policy task ledger will appear here.</div>
+      </div>
+      <div class="panel-card">
+        <h3>Task telemetry</h3>
+        <div id="policy-task-detail" class="card-empty">Policy task event telemetry will appear here.</div>
+      </div>
     </div>
 
-    <div id="policy-tasks" class="card-empty" style="margin-top: 12px;">
-      Policy task ledger will appear here.
-    </div>
-    <div id="policy-task-detail" class="card-empty" style="margin-top: 8px;">
-      Policy task event telemetry will appear here.
-    </div>
-
-    <div class="policy-task-filters" style="margin-top: 8px; display: flex; gap: 8px; align-items: end; flex-wrap: wrap;">
+    <div class="policy-task-filters panel-card">
+      <h3>Task filters</h3>
       <label>Status
         <select id="policy-task-status">
           <option value="">Any</option>
@@ -62,30 +75,35 @@
       <label>Offset
         <input id="policy-task-offset" type="number" min="0" value="0" />
       </label>
-      <button type="button" onclick="pollPolicy()">Filter tasks</button>
+      <div class="policy-controls" style="justify-content: flex-end;">
+        <button type="button" onclick="pollPolicy()">Filter tasks</button>
+      </div>
     </div>
 
-    <div id="policy-budget" class="card-empty" style="margin-top: 12px;">
-      Policy token budget will appear here.
+    <div class="panel-grid two-col">
+      <div class="panel-card">
+        <h3>Token budget</h3>
+        <div id="policy-budget" class="card-empty">Policy token budget will appear here.</div>
+      </div>
+      <div class="panel-card">
+        <h3>Backend decisioning</h3>
+        <div id="policy-preflight-state" class="tab-meta muted-note" style="margin-bottom: 8px;"></div>
+        <div id="policy-backend" class="card-empty">Backend decisions will appear here.</div>
+      </div>
     </div>
 
-    <div style="margin-top: 12px;">
+    <div class="panel-card">
+      <h3>Model preflight</h3>
       <div id="policy-preflight-message" class="muted-note"></div>
-      <div id="policy-preflight-state" class="muted-note" style="margin-bottom: 8px;"></div>
-      <div id="policy-preflight" class="card-empty" style="margin-bottom: 12px;">
-        Model attestation data will appear here.
-      </div>
-      <div id="policy-backend" class="card-empty" style="margin-bottom: 12px;">
-        Backend decisions will appear here.
-      </div>
+      <div id="policy-preflight" class="card-empty">Model attestation data will appear here.</div>
     </div>
 
-    <div style="margin-top: 12px;">
-      <div style="display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;">
-        <strong>Repair loop</strong>
+    <div class="panel-card">
+      <div style="display: flex; gap: 8px; align-items: baseline; justify-content: space-between; flex-wrap: wrap;">
+        <h3 style="margin-bottom: 0;">Repair loop</h3>
         <span id="policy-repair-status" class="muted-note"></span>
       </div>
-      <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px;">
+      <div class="policy-controls" style="margin-top: 8px;">
         <label>Cycle
           <input id="policy-repair-cycle" type="number" min="0" max="20" />
         </label>
@@ -97,37 +115,35 @@
       <div id="policy-repair-message" class="muted-note"></div>
     </div>
 
-    <div class="policy-preflight-form" style="margin-top: 12px;">
+    <div class="panel-card policy-preflight-form">
       <h3>Runtime preflight</h3>
-      <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
-        <label>Role
-          <select id="policy-pref-role" onchange="policyPrefRoleChanged()">
-            <option value="executor">executor</option>
-            <option value="tester">tester</option>
-            <option value="explorer">explorer</option>
-            <option value="reviewer">reviewer</option>
-            <option value="security review">security review</option>
-          </select>
-        </label>
-        <label>Model
-          <input id="policy-pref-model" type="text" placeholder="gpt-5.6-luna" />
-        </label>
-        <label>Effort
-          <input id="policy-pref-effort" type="text" placeholder="medium" />
-        </label>
-        <label>Sandbox
-          <input id="policy-pref-sandbox" type="text" placeholder="read_only" />
-        </label>
-      </div>
-      <label class="policy-pref-auto" style="display: flex; gap: 8px; align-items: center; margin-top: 4px;">
+      <label>Role
+        <select id="policy-pref-role" onchange="policyPrefRoleChanged()">
+          <option value="executor">executor</option>
+          <option value="tester">tester</option>
+          <option value="explorer">explorer</option>
+          <option value="reviewer">reviewer</option>
+          <option value="security review">security review</option>
+        </select>
+      </label>
+      <label>Model
+        <input id="policy-pref-model" type="text" placeholder="gpt-5.6-luna" />
+      </label>
+      <label>Effort
+        <input id="policy-pref-effort" type="text" placeholder="medium" />
+      </label>
+      <label>Sandbox
+        <input id="policy-pref-sandbox" type="text" placeholder="read_only" />
+      </label>
+      <label class="policy-pref-auto">
         <input id="policy-pref-auto" type="checkbox" checked />
         Auto-run probe when no output is provided
       </label>
-      <div id="policy-pref-hint" class="muted-note" style="margin: 8px 0;">Running preflight for role=executor. Leave output blank to auto-run.</div>
-      <textarea id="policy-pref-output" rows="5" style="width: 100%;" placeholder='Paste probe output (JSON or "role/model/effort/sandbox/marker" lines).'></textarea>
-      <div style="margin-top: 8px;">
+      <div id="policy-pref-hint" class="muted-note">Running preflight for role=executor. Leave output blank to auto-run.</div>
+      <textarea id="policy-pref-output" rows="5" placeholder='Paste probe output (JSON or "role/model/effort/sandbox/marker" lines).'></textarea>
+      <div class="policy-controls">
         <button type="button" onclick="runPolicyPreflight()">Run preflight</button>
-        <span id="policy-pref-status"></span>
+        <span id="policy-pref-status" class="muted-note"></span>
       </div>
     </div>
   </div>
