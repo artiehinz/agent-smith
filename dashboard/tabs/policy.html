@@ -1,0 +1,65 @@
+<section class="tab-content" id="tab-policy">
+  <div class="panel policy-panel">
+    <h2>Policy</h2>
+    <div class="policy-override" style="margin: 0 0 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <label for="policy-route-select">Route</label>
+      <select id="policy-route-select">
+        <option value="direct">direct</option>
+        <option value="structured">structured</option>
+        <option value="parallel">parallel</option>
+      </select>
+      <button id="policy-route-apply" onclick="applyPolicyRoute()" type="button">Apply</button>
+      <span id="policy-route-message"></span>
+      <span id="policy-route-current" style="margin-left: auto;"></span>
+    </div>
+    <div id="policy-summary" class="card-empty">
+      Policy route and model information will appear here.
+    </div>
+    <div id="policy-tasks" class="card-empty" style="margin-top: 12px;">
+      Policy task ledger will appear here.
+    </div>
+    <div id="policy-budget" class="card-empty" style="margin-top: 12px;">
+      Policy token budget will appear here.
+    </div>
+
+    <div style="margin-top: 12px;">
+      <div id="policy-preflight-message" class="muted-note"></div>
+      <div id="policy-preflight" class="card-empty" style="margin-bottom: 12px;">
+        Model attestation data will appear here.
+      </div>
+      <div id="policy-backend" class="card-empty" style="margin-bottom: 12px;">
+        Backend decisions will appear here.
+      </div>
+    </div>
+
+    <div class="policy-preflight-form" style="margin-top: 12px;">
+      <h3>Runtime preflight</h3>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+        <label>Role
+          <select id="policy-pref-role" onchange="policyPrefRoleChanged()">
+            <option value="executor">executor</option>
+            <option value="tester">tester</option>
+            <option value="explorer">explorer</option>
+            <option value="reviewer">reviewer</option>
+            <option value="security review">security review</option>
+          </select>
+        </label>
+        <label>Model
+          <input id="policy-pref-model" type="text" placeholder="gpt-5.6-luna" />
+        </label>
+        <label>Effort
+          <input id="policy-pref-effort" type="text" placeholder="medium" />
+        </label>
+        <label>Sandbox
+          <input id="policy-pref-sandbox" type="text" placeholder="read_only" />
+        </label>
+      </div>
+      <div id="policy-pref-hint" class="muted-note" style="margin: 8px 0;">Running preflight for role=executor. Paste probe output below.</div>
+      <textarea id="policy-pref-output" rows="5" style="width: 100%;" placeholder='Paste probe output (JSON or "role/model/effort/sandbox/marker" lines).'></textarea>
+      <div style="margin-top: 8px;">
+        <button type="button" onclick="runPolicyPreflight()">Run preflight</button>
+        <span id="policy-pref-status"></span>
+      </div>
+    </div>
+  </div>
+</section>

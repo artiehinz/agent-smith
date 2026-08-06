@@ -1,0 +1,4 @@
+﻿# Keep policy state files and generated outputs out of normal scans and local caches.
+__pending__/
+artifacts/
+tmp/
