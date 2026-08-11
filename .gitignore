@@ -1,7 +1,8 @@
 # Local policy/bootstrap artifacts (keep checked out locally, out of commits)
-references/
-skills/
+/references/
+/skills/
 .codex-control/
+.agent-smith/runtime/
 session.json
 tools/policy/artifacts/
 core/policy/__pending__/

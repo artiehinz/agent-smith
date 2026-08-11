@@ -13,15 +13,17 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 import sys
 from typing import Any
+
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core import session as scan_session
+from core import paths as smith_paths
 from core.policy import (
     ModelAttestation,
     ModelSpec,
@@ -40,7 +42,7 @@ from core.policy import (
 )
 
 INDEX_FILE = REPO_ROOT / "dashboard" / "index.html"
-POLICY_LEDGER_DB = REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+POLICY_LEDGER_DB = smith_paths.STATE_DIR / "policy_task_ledger.sqlite"
 INCLUDE_RE = re.compile(r"{%\s*include\s+'([^']+)'\s*%}")
 
 _ALLOWED_ROUTES = {"direct", "structured", "parallel"}
@@ -273,6 +275,20 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _resolve_static_file(parsed_path: str) -> Path | None:
+    """Resolve a public dashboard asset without exposing arbitrary repo files."""
+    relative = urllib.parse.unquote(parsed_path).lstrip("/")
+    allowed_root_files = {"favicon.png", "favicon.ico", "favicon-32x32.png", "logo.png"}
+    if not (relative.startswith("static/") or relative in allowed_root_files):
+        return None
+    target = (REPO_ROOT / relative).resolve()
+    try:
+        target.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return None
+    return target if target.is_file() else None
+
+
 class _DashboardHandler(BaseHTTPRequestHandler):
     def _serve_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
@@ -297,15 +313,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(file_path.read_bytes())
 
     def _serve_static(self, parsed_path: str) -> None:
-        if parsed_path.startswith("/"):
-            parsed_path = parsed_path[1:]
-        file_path = REPO_ROOT / parsed_path
-        if parsed_path.startswith("dashboard/"):
-            if parsed_path == "dashboard":
-                file_path = INDEX_FILE
-            if file_path.is_dir():
-                self.send_error(404, "not found")
-                return
+        file_path = _resolve_static_file(parsed_path)
+        if file_path is None:
+            self.send_error(404, "not found")
+            return
         self._serve_file(file_path)
 
     def _handle_api(self, path: str, method: str, payload: dict[str, Any] | None = None) -> None:
@@ -788,12 +799,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         }:
             return self._serve_static(path)
 
-        if path in {"/dashboard/index.html", "/api/policy", "/api/policy/preflight"}:
-            self._serve_static(path)
-            return
-
-        # Fallback static path under repo root (covers any directly loaded test assets).
-        return self._serve_static(path)
+        self.send_error(404, "not found")
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)

@@ -60,7 +60,7 @@ def _fixed_context_overhead_chars() -> int:
         from core import paths as _paths
 
         for name in ("CLAUDE.md", "AGENTS.md"):
-            p = _paths.REPO_ROOT / name
+            p = _paths.PROJECT_ROOT / name
             if p.is_file():
                 base += p.stat().st_size
                 break

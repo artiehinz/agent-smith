@@ -1,33 +1,18 @@
-Policy execution plan bootstrap
-==============================
+Agent Smith planning archive
+============================
 
-Purpose
--------
-- Track the execution plan and policy work in this repository.
-- Keep missing artifacts discoverable so implementation work can start without re-discovery.
+The files under plans/ are historical design and implementation artifacts from
+the original policy-engine prototype. They are retained for decision context,
+not as current setup instructions or a source of runtime truth.
 
-What was prepared
------------------
-- External workflow reference repos checked out under `references/`:
-  - `references/codex-workflow`
-  - `references/codex-agent-config`
-  - `references/codex_workflows`
-- Policy API route scaffold added:
-  - `core/api_server/routes/policy_routes.py`
-- Policy UI scaffold folders added:
-  - `dashboard/policy/policy.html`
-  - `dashboard/policy/policy.js`
-  - `dashboard/tabs/policy.html`
-  - `dashboard/js/policy.js`
-- Local bootstrap helper:
-  - `tools/bootstrap/policy_repos.ps1`
-- Plan notes:
-  - `plans/readme.txt` (this file)
-  - `plans/implementation/*.md`
-  - `docs/policies/design-notes/*.md`
+Current supported integration
+-----------------------------
+- README.md documents project connection and operation.
+- agent_smith/integration.py owns connect, doctor, and disconnect behavior.
+- agent_smith/templates/agent-smith/ owns the repo-local Codex skill.
+- core/policy/ contains the optional route and launch-policy engine.
+- tests/ contains the executable behavior contract.
 
-Next work (in order)
---------------------
-1. Finish wiring policy artifacts into active worker orchestration paths (not yet connected end-to-end).
-2. Drive policy-led dashboard controls from real launch/repair actions (route reset + repair counters).
-3. Replace manual preflight copy/paste with automatic codex-version probe in production workflow.
+When a plan conflicts with source, tests, or README.md, treat the plan as
+superseded. New implementation work should update executable tests and current
+documentation rather than marking these archived plans as live state.

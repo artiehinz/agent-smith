@@ -43,7 +43,7 @@ from core.policy import (
     upsert_task,
 )
 
-_POLICY_LEDGER_DB = _paths.REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+_POLICY_LEDGER_DB = _paths.STATE_DIR / "policy_task_ledger.sqlite"
 _SESSION_DEFAULT_PRESTART_PRELIGHT_ROLES = (
     "executor",
     "tester",

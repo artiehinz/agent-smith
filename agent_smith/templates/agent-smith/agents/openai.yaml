@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Smith"
+  short_description: "Route and verify multi-agent Codex work"
+  default_prompt: "Use $agent-smith to plan, execute, and verify this task with the smallest effective agent topology."

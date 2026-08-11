@@ -1,12 +1,22 @@
 """Policy and execution-route telemetry endpoints."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Path
-from fastapi.responses import JSONResponse
+try:
+    from fastapi import Path
+    from fastapi.responses import JSONResponse
+except ImportError:  # pragma: no cover - exercised by the isolated import smoke test
+    def Path(default: Any = None, **_kwargs: Any) -> Any:  # noqa: N802
+        return default
+
+    class JSONResponse:  # minimal compatibility response for the dependency-free runtime
+        def __init__(self, content: Any, status_code: int = 200) -> None:
+            self.body = json.dumps(content, ensure_ascii=False).encode("utf-8")
+            self.status_code = status_code
 
 import core.paths as _paths
 
@@ -30,7 +40,7 @@ from core.policy import (
 from ._common import router
 
 _log = logging.getLogger(__name__)
-_POLICY_LEDGER_DB = _paths.REPO_ROOT / ".codex-control" / "policy_task_ledger.sqlite"
+_POLICY_LEDGER_DB = _paths.STATE_DIR / "policy_task_ledger.sqlite"
 _ALLOWED_ROUTES = {"direct", "structured", "parallel"}
 _ALLOWED_PREFLIGHT_ROLES = {
     "explorer",

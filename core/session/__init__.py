@@ -7,9 +7,9 @@ import os
 from datetime import datetime, timezone
 from core import paths as _paths
 
-_REPO_ROOT = _paths.REPO_ROOT
-_SESSION_FILE = _REPO_ROOT / "session.json"
-_SMITH_CALLER_FILE = _REPO_ROOT / ".codex-control" / "smith_caller.json"
+_REPO_ROOT = _paths.INSTALL_ROOT
+_SESSION_FILE = _paths.STATE_DIR / "session.json"
+_SMITH_CALLER_FILE = _paths.STATE_DIR / "smith_caller.json"
 
 _current: dict | None = None
 _last_local_write_mtime: float = 0.0
