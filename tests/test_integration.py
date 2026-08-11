@@ -16,6 +16,17 @@ from agent_smith.integration import AGENTS_START, connect, disconnect, doctor
 from tools.run_policy_dashboard import REPO_ROOT, _DashboardHandler, _resolve_static_file
 
 
+def _run_hook(project: Path, payload: dict[str, object]) -> dict[str, object]:
+    result = subprocess.run(
+        [sys.executable, str(project / ".codex" / "hooks" / "agent-smith.py")],
+        input=json.dumps({"cwd": str(project), **payload}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
 def test_connect_preserves_existing_files_and_is_idempotent(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("# Existing\n\n- Keep me.\n", encoding="utf-8")
     (tmp_path / ".codex").mkdir()
@@ -36,8 +47,25 @@ def test_connect_preserves_existing_files_and_is_idempotent(tmp_path: Path) -> N
     config = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8"))
     assert config["features"]["multi_agent"] is True
     assert "agent_smith_reviewer" in config["agents"]
+    assert "SessionStart" in config["hooks"]
+    assert "SubagentStart" in config["hooks"]
+    assert "UserPromptSubmit" in config["hooks"]
+    assert "Stop" in config["hooks"]
     assert (tmp_path / ".agents" / "skills" / "agent-smith" / "SKILL.md").is_file()
+    assert (tmp_path / ".codex" / "hooks" / "agent-smith.py").is_file()
+    assert (tmp_path / ".agent-smith" / "context.md").is_file()
     assert doctor(tmp_path)["ok"] is True
+
+
+def test_connect_never_overwrites_project_owned_context(tmp_path: Path) -> None:
+    connect(tmp_path)
+    context = tmp_path / ".agent-smith" / "context.md"
+    context.write_text("# Deliberate project memory\n", encoding="utf-8")
+
+    connect(tmp_path)
+    connect(tmp_path, force=True)
+
+    assert context.read_text(encoding="utf-8") == "# Deliberate project memory\n"
 
 
 def test_disconnect_preserves_modified_generated_file(tmp_path: Path) -> None:
@@ -51,6 +79,7 @@ def test_disconnect_preserves_modified_generated_file(tmp_path: Path) -> None:
     assert role.is_file()
     assert AGENTS_START not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert not (tmp_path / ".agent-smith" / "config.json").exists()
+    assert (tmp_path / ".agent-smith" / "context.md").is_file()
 
 
 def test_connect_refuses_to_overwrite_modified_generated_file_without_force(tmp_path: Path) -> None:
@@ -116,8 +145,80 @@ def test_dashboard_serves_ui_but_not_repository_source() -> None:
 def test_manifest_is_machine_readable(tmp_path: Path) -> None:
     connect(tmp_path)
     manifest = json.loads((tmp_path / ".agent-smith" / "config.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
+    assert manifest["context_file"] == ".agent-smith/context.md"
     assert manifest["managed_files"]
+
+
+def test_session_start_hook_injects_compact_project_context(tmp_path: Path) -> None:
+    connect(tmp_path)
+    context = tmp_path / ".agent-smith" / "context.md"
+    context.write_text("# Durable fact\n\n- Verify with `make test`.\n", encoding="utf-8")
+
+    output = _run_hook(tmp_path, {"hook_event_name": "SessionStart", "source": "startup"})
+
+    specific = output["hookSpecificOutput"]
+    assert specific["hookEventName"] == "SessionStart"
+    assert "Verify with `make test`" in specific["additionalContext"]
+
+    subagent = _run_hook(
+        tmp_path,
+        {"hook_event_name": "SubagentStart", "agent_type": "agent_smith_explorer"},
+    )
+    assert subagent["hookSpecificOutput"]["hookEventName"] == "SubagentStart"
+    assert "Verify with `make test`" in subagent["hookSpecificOutput"]["additionalContext"]
+
+
+def test_stop_hook_continues_once_for_material_changes(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    connect(tmp_path)
+    identity = {"session_id": "session-1", "turn_id": "turn-1"}
+    baseline = _run_hook(tmp_path, {"hook_event_name": "UserPromptSubmit", **identity})
+    (tmp_path / "src.py").write_text("print('changed')\n", encoding="utf-8")
+
+    first = _run_hook(tmp_path, {"hook_event_name": "Stop", "stop_hook_active": False, **identity})
+    second = _run_hook(tmp_path, {"hook_event_name": "Stop", "stop_hook_active": True, **identity})
+
+    assert baseline == {"continue": True}
+    assert first["decision"] == "block"
+    assert "documentation delta" in first["reason"]
+    assert "src.py" in first["reason"]
+    assert second == {"continue": True}
+
+
+def test_stop_hook_does_not_churn_for_documentation_only_changes(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    connect(tmp_path)
+    identity = {"session_id": "session-2", "turn_id": "turn-2"}
+    _run_hook(tmp_path, {"hook_event_name": "UserPromptSubmit", **identity})
+    (tmp_path / "README.md").write_text("# Docs only\n", encoding="utf-8")
+
+    output = _run_hook(tmp_path, {"hook_event_name": "Stop", "stop_hook_active": False, **identity})
+
+    assert output == {"continue": True}
+
+
+def test_stop_hook_ignores_material_changes_that_predate_the_turn(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
+    connect(tmp_path)
+    (tmp_path / "existing.py").write_text("print('already dirty')\n", encoding="utf-8")
+    identity = {"session_id": "session-3", "turn_id": "turn-3"}
+
+    _run_hook(tmp_path, {"hook_event_name": "UserPromptSubmit", **identity})
+    output = _run_hook(tmp_path, {"hook_event_name": "Stop", "stop_hook_active": False, **identity})
+
+    assert output == {"continue": True}
+
+
+def test_doctor_rejects_oversized_context(tmp_path: Path) -> None:
+    connect(tmp_path)
+    (tmp_path / ".agent-smith" / "context.md").write_text("x" * (16 * 1024 + 1), encoding="utf-8")
+
+    result = doctor(tmp_path)
+
+    assert result["ok"] is False
+    check = next(item for item in result["checks"] if item["name"] == "project context")
+    assert check["status"] == "fail"
 
 
 def test_policy_routes_import_without_site_packages() -> None:

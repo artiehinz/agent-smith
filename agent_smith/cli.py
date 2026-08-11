@@ -55,6 +55,17 @@ def _dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _context(args: argparse.Namespace) -> int:
+    path = Path(args.project).expanduser().resolve() / ".agent-smith" / "context.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"Agent Smith project context not found: {path}; run connect first")
+    if args.path_only:
+        print(path)
+    else:
+        print(path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-smith",
@@ -74,6 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = subparsers.add_parser("disconnect", help="remove unmodified generated integration files")
     command.add_argument("project", nargs="?", default=".")
+
+    command = subparsers.add_parser("context", help="show the connected project's durable context")
+    command.add_argument("project", nargs="?", default=".")
+    command.add_argument("--path", action="store_true", dest="path_only", help="print only the context file path")
 
     command = subparsers.add_parser("dashboard", help="run the optional local policy dashboard")
     command.add_argument("project", nargs="?", default=".")
@@ -114,7 +129,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Disconnected Agent Smith from {result['project']}.")
             if result["preserved_modified"]:
                 print("Preserved modified generated files: " + ", ".join(result["preserved_modified"]))
+            print("Preserved project-owned context: " + str(result["preserved_context"]))
             return 0
+        if args.command == "context":
+            return _context(args)
         if args.command == "route":
             return _route(args)
         if args.command == "dashboard":

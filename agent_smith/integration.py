@@ -23,11 +23,19 @@ IGNORE_END = "# agent-smith:end"
 AGENTS_BLOCK = f"""{AGENTS_START}
 ## Agent Smith orchestration
 
-- Use `$agent-smith` for non-trivial implementation, debugging, review, or repository-wide work.
+- Apply Agent Smith to every repository modification. Use the direct route for small changes and `$agent-smith` explicitly when orchestration would help.
+- Read `.agent-smith/context.md` before non-trivial work; treat current source and tests as authoritative when it is stale.
 - Choose the smallest effective topology: work directly when one owner is faster; delegate only independent, bounded work.
 - Keep one writer per worktree. Parallelize read-only discovery and isolated work, then verify all handoffs in the primary thread.
 - Treat subagent output as evidence, not completion. The primary agent owns integration, tests, and the final verdict.
+- Before finishing any material change, run a documentation delta review. Update project context and relevant docs when behavior, architecture, setup, commands, or invariants changed; otherwise state that no documentation update was needed. Never create timestamp-only or status-only churn.
 {AGENTS_END}"""
+
+UNIX_HOOK_COMMAND = 'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/agent-smith.py"'
+WINDOWS_HOOK_COMMAND = (
+    'powershell -NoProfile -ExecutionPolicy Bypass -Command '
+    '"$root = git rev-parse --show-toplevel; python (Join-Path $root \'.codex/hooks/agent-smith.py\')"'
+)
 
 CODEX_BLOCK = f'''{CODEX_START}
 [agents.agent_smith_explorer]
@@ -45,6 +53,44 @@ config_file = "agents/agent-smith-tester.toml"
 [agents.agent_smith_reviewer]
 description = "Read-only review for correctness, security, regressions, and missing verification."
 config_file = "agents/agent-smith-reviewer.toml"
+
+[[hooks.SessionStart]]
+matcher = "^(startup|resume|clear|compact)$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = {json.dumps(UNIX_HOOK_COMMAND)}
+command_windows = {json.dumps(WINDOWS_HOOK_COMMAND)}
+statusMessage = "Loading Agent Smith project context"
+additionalContextLimit = 4000
+timeout = 10
+
+[[hooks.SubagentStart]]
+
+[[hooks.SubagentStart.hooks]]
+type = "command"
+command = {json.dumps(UNIX_HOOK_COMMAND)}
+command_windows = {json.dumps(WINDOWS_HOOK_COMMAND)}
+statusMessage = "Loading Agent Smith project context"
+additionalContextLimit = 4000
+timeout = 10
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = {json.dumps(UNIX_HOOK_COMMAND)}
+command_windows = {json.dumps(WINDOWS_HOOK_COMMAND)}
+timeout = 10
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = {json.dumps(UNIX_HOOK_COMMAND)}
+command_windows = {json.dumps(WINDOWS_HOOK_COMMAND)}
+statusMessage = "Checking Agent Smith documentation delta"
+timeout = 15
 {CODEX_END}'''
 
 ROLE_CONFIGS = {
@@ -65,6 +111,204 @@ sandbox_mode = "read-only"
 developer_instructions = """Review the assigned change without editing. Prioritize correctness, security, data loss, concurrency, public contracts, and missing tests. Report findings by severity with file and line evidence; say explicitly when no material findings remain."""
 ''',
 }
+
+HOOK_SCRIPT = r'''"""Agent Smith lifecycle hook installed into a connected project."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import subprocess
+import sys
+from pathlib import Path
+
+MAX_CONTEXT_BYTES = 16 * 1024
+INTEGRATION_PREFIXES = (
+    ".agent-smith/runtime/",
+    ".agents/skills/agent-smith/",
+    ".codex/agents/agent-smith-",
+    ".codex/hooks/agent-smith.py",
+)
+INTEGRATION_FILES = {".agent-smith/config.json", ".codex/config.toml", ".gitignore", "AGENTS.md"}
+DOC_SUFFIXES = {".md", ".mdx", ".rst", ".adoc", ".txt"}
+
+
+def emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, separators=(",", ":")))
+
+
+def project_root(cwd: str | None) -> Path:
+    candidate = Path(cwd or ".").expanduser().resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return Path(result.stdout.strip()).resolve()
+    except (OSError, subprocess.SubprocessError):
+        return candidate
+
+
+def file_signature(root: Path, relative: str) -> str:
+    path = root / relative
+    try:
+        stat = path.stat()
+        if not path.is_file():
+            return f"other:{stat.st_size}:{stat.st_mtime_ns}"
+        if stat.st_size > 4 * 1024 * 1024:
+            return f"large:{stat.st_size}:{stat.st_mtime_ns}"
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
+
+
+def working_state(root: Path) -> dict[str, str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    state: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        status = line[:2]
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip('"').replace("\\", "/")
+        state[path] = f"{status}:{file_signature(root, path)}"
+    return state
+
+
+def baseline_path(root: Path, payload: dict[str, object]) -> Path:
+    identity = f"{payload.get('session_id', '')}:{payload.get('turn_id', '')}"
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return root / ".agent-smith" / "runtime" / "hook-baselines" / f"{key}.json"
+
+
+def save_baseline(root: Path, payload: dict[str, object]) -> None:
+    path = baseline_path(root, payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(working_state(root), sort_keys=True), encoding="utf-8")
+    emit({"continue": True})
+
+
+def load_baseline(root: Path, payload: dict[str, object]) -> dict[str, str] | None:
+    path = baseline_path(root, payload)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {str(key): str(value) for key, value in raw.items()} if isinstance(raw, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def clear_baseline(root: Path, payload: dict[str, object]) -> None:
+    try:
+        baseline_path(root, payload).unlink()
+    except OSError:
+        pass
+
+
+def is_material(path: str) -> bool:
+    if path in INTEGRATION_FILES or path.startswith(INTEGRATION_PREFIXES):
+        return False
+    lowered = path.lower()
+    if lowered.startswith("docs/") or Path(lowered).suffix in DOC_SUFFIXES:
+        return False
+    return True
+
+
+def load_context(root: Path, event: str) -> None:
+    context_path = root / ".agent-smith" / "context.md"
+    try:
+        raw = context_path.read_bytes()[:MAX_CONTEXT_BYTES]
+        context = raw.decode("utf-8", errors="replace")
+    except OSError:
+        context = "Project context is missing. Re-run `agent-smith connect .`."
+    reminder = (
+        "Agent Smith is connected. Use this compact project memory for repository work, "
+        "but prefer current source and tests if it conflicts. Before finishing a material "
+        "change, review documentation impact and update context/docs only for durable changes."
+    )
+    emit({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": f"{reminder}\n\n{context}",
+        }
+    })
+
+
+def stop(root: Path, payload: dict[str, object]) -> None:
+    if payload.get("stop_hook_active"):
+        clear_baseline(root, payload)
+        emit({"continue": True})
+        return
+    current = working_state(root)
+    baseline = load_baseline(root, payload)
+    changed = current if baseline is None else {
+        path: current.get(path, "missing")
+        for path in current.keys() | baseline.keys()
+        if current.get(path) != baseline.get(path)
+    }
+    material = [path for path in sorted(changed) if is_material(path)]
+    if not material:
+        clear_baseline(root, payload)
+        emit({"continue": True})
+        return
+    preview = ", ".join(material[:8])
+    if len(material) > 8:
+        preview += f", and {len(material) - 8} more"
+    emit({
+        "decision": "block",
+        "reason": (
+            "Agent Smith final documentation delta gate: material repository changes were "
+            f"detected ({preview}). Review whether behavior, architecture, setup, commands, "
+            "invariants, or durable decisions changed. If so, update `.agent-smith/context.md` "
+            "and the relevant project documentation now. If not, explicitly confirm that no "
+            "documentation update is needed, then finish. Do not create timestamp-only or "
+            "status-only documentation churn."
+        ),
+    })
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise ValueError("hook input must be a JSON object")
+        root = project_root(str(payload.get("cwd") or "."))
+        event = payload.get("hook_event_name")
+        if event in {"SessionStart", "SubagentStart"}:
+            load_context(root, str(event))
+        elif event == "UserPromptSubmit":
+            save_baseline(root, payload)
+        elif event == "Stop":
+            stop(root, payload)
+        else:
+            emit({"continue": True})
+        return 0
+    except Exception as exc:  # Hooks must fail open instead of breaking repository work.
+        emit({"continue": True, "systemMessage": f"Agent Smith hook warning: {exc}"})
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+GENERATED_FILES = {
+    **ROLE_CONFIGS,
+    ".codex/hooks/agent-smith.py": HOOK_SCRIPT,
+}
+
+CONTEXT_MAX_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -144,6 +388,55 @@ def _validate_toml(content: str, path: Path) -> None:
         raise ValueError(f"refusing to write invalid TOML to {path}: {exc}") from exc
 
 
+def _context_template(root: Path) -> str:
+    candidates = (
+        "README.md",
+        "CONTRIBUTING.md",
+        "docs/README.md",
+        "pyproject.toml",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "requirements.txt",
+        "Makefile",
+        "justfile",
+    )
+    detected = [relative for relative in candidates if (root / relative).is_file()]
+    docs_map = "\n".join(f"- `{relative}`" for relative in detected) or "- Add authoritative project documents and manifests here."
+    return f"""# {root.name} project context
+
+This is durable, compact project memory for Agent Smith and Codex. Keep it factual, under 200 lines and 16 KiB, and update it only when durable project knowledge changes. Current source, tests, and explicit user instructions remain authoritative.
+
+## Purpose and scope
+
+- Describe what this project does and what is out of scope.
+
+## Architecture and component map
+
+- Add the important components, boundaries, and data flow.
+
+## Commands and verification
+
+- Add canonical setup, run, lint, test, build, and release commands.
+
+## Invariants and constraints
+
+- Add compatibility, security, data, ownership, and operational constraints.
+
+## Current focus and open risks
+
+- Add only active, durable context that would change how the next task is solved.
+
+## Durable decisions
+
+- Keep the latest useful decisions; remove superseded or temporary status notes.
+
+## Documentation map
+
+{docs_map}
+"""
+
+
 def connect(project: str | Path = ".", *, force: bool = False) -> dict[str, object]:
     """Connect Agent Smith to a project without replacing existing project guidance."""
     root = Path(project).expanduser().resolve()
@@ -173,7 +466,7 @@ def connect(project: str | Path = ".", *, force: bool = False) -> dict[str, obje
         if isinstance(raw_managed, dict):
             previous_managed = {str(key): str(value) for key, value in raw_managed.items()}
 
-    planned_targets = [root / relative for relative in ROLE_CONFIGS]
+    planned_targets = [root / relative for relative in GENERATED_FILES]
     planned_targets.extend(target for _source, target in _skill_files(root))
     conflicts: list[str] = []
     for target in planned_targets:
@@ -194,7 +487,7 @@ def connect(project: str | Path = ".", *, force: bool = False) -> dict[str, obje
     _write_text(agents_path, agents_content)
     _write_text(config_path, config_content)
 
-    for relative, content in ROLE_CONFIGS.items():
+    for relative, content in GENERATED_FILES.items():
         target = root / relative
         _write_text(target, content)
         managed_files[relative] = _sha256(target)
@@ -205,11 +498,16 @@ def connect(project: str | Path = ".", *, force: bool = False) -> dict[str, obje
 
     _write_text(ignore_path, ignore_content)
 
+    context_path = root / ".agent-smith" / "context.md"
+    if not context_path.exists():
+        _write_text(context_path, _context_template(root))
+
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "agent_smith_version": __version__,
         "project_root": str(root),
         "managed_files": managed_files,
+        "context_file": ".agent-smith/context.md",
         "runtime_dir": ".agent-smith/runtime",
         "headroom": "optional",
     }
@@ -254,6 +552,17 @@ def doctor(project: str | Path = ".") -> dict[str, object]:
     skill = root / ".agents" / "skills" / "agent-smith" / "SKILL.md"
     checks.append(Check("skill", "pass" if skill.is_file() else "fail", str(skill)))
 
+    context = root / ".agent-smith" / "context.md"
+    context_size = context.stat().st_size if context.is_file() else 0
+    context_ok = context.is_file() and context_size <= CONTEXT_MAX_BYTES
+    if not context.is_file():
+        context_detail = "missing; run connect"
+    elif context_size > CONTEXT_MAX_BYTES:
+        context_detail = f"{context_size} bytes; compact below {CONTEXT_MAX_BYTES}"
+    else:
+        context_detail = f"{context_size} bytes; durable project memory ready"
+    checks.append(Check("project context", "pass" if context_ok else "fail", context_detail))
+
     config = root / ".codex" / "config.toml"
     config_ok = False
     config_detail = "missing"
@@ -261,13 +570,23 @@ def doctor(project: str | Path = ".") -> dict[str, object]:
         try:
             parsed = tomllib.loads(config.read_text(encoding="utf-8"))
             configured = parsed.get("agents", {}) if isinstance(parsed, dict) else {}
-            config_ok = all(name in configured for name in (
+            hooks = parsed.get("hooks", {}) if isinstance(parsed, dict) else {}
+            roles_ok = all(name in configured for name in (
                 "agent_smith_explorer",
                 "agent_smith_executor",
                 "agent_smith_tester",
                 "agent_smith_reviewer",
             ))
-            config_detail = "valid with Agent Smith roles" if config_ok else "valid TOML, roles missing"
+            hooks_ok = isinstance(hooks, dict) and all(
+                name in hooks for name in ("SessionStart", "SubagentStart", "UserPromptSubmit", "Stop")
+            )
+            config_ok = roles_ok and hooks_ok
+            if config_ok:
+                config_detail = "valid with Agent Smith roles and lifecycle hooks"
+            elif not roles_ok:
+                config_detail = "valid TOML, roles missing"
+            else:
+                config_detail = "valid TOML, lifecycle hooks missing"
         except (OSError, tomllib.TOMLDecodeError) as exc:
             config_detail = f"invalid: {exc}"
     checks.append(Check("Codex config", "pass" if config_ok else "fail", config_detail))
@@ -350,4 +669,10 @@ def disconnect(project: str | Path = ".") -> dict[str, object]:
             directory.rmdir()
         except OSError:
             pass
-    return {"ok": True, "project": str(root), "removed": removed, "preserved_modified": preserved}
+    return {
+        "ok": True,
+        "project": str(root),
+        "removed": removed,
+        "preserved_modified": preserved,
+        "preserved_context": str(root / ".agent-smith" / "context.md"),
+    }

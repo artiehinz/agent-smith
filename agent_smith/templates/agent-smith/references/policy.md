@@ -36,3 +36,9 @@ Required handoff: files/lines, reproduction command/result, uncertainty, recomme
 5. Independent review for consequential changes.
 
 Use only the levels needed to resolve material uncertainty.
+
+## Durable context policy
+
+The connected project's `.agent-smith/context.md` is a compact map for future agents, not an activity log. Record only knowledge that changes how future work should be understood or verified: purpose, component boundaries, canonical commands, invariants, active durable risks, and consequential decisions. Prefer links to authoritative project documents over duplication. Remove stale or superseded notes during the task that invalidates them.
+
+The final documentation delta review is required for material repository changes, but an edit is not. A concise confirmation that behavior and durable project knowledge did not change is better than noisy timestamps, completion logs, or restating the diff.

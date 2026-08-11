@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-smith-codex"
-version = "0.2.0"
+version = "0.3.0"
 description = "Repo-local policy and multi-agent workflow integration for Codex"
 readme = "README.md"
 requires-python = ">=3.11"
