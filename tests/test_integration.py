@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_smith.cli import main
 from agent_smith.integration import AGENTS_START, connect, disconnect, doctor
 from tools.run_policy_dashboard import REPO_ROOT, _DashboardHandler, _resolve_static_file
 
@@ -54,6 +55,16 @@ def test_connect_preserves_existing_files_and_is_idempotent(tmp_path: Path) -> N
     assert (tmp_path / ".agents" / "skills" / "agent-smith" / "SKILL.md").is_file()
     assert (tmp_path / ".codex" / "hooks" / "agent-smith.py").is_file()
     assert (tmp_path / ".agent-smith" / "context.md").is_file()
+    assert doctor(tmp_path)["ok"] is True
+
+
+def test_setup_connects_and_validates_in_one_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    result = main(["setup", str(tmp_path)])
+
+    output = capsys.readouterr()
+    assert result == 0
+    assert "Agent Smith is ready." in output.out
+    assert "run `/hooks`" in output.out
     assert doctor(tmp_path)["ok"] is True
 
 

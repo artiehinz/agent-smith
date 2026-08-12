@@ -4,6 +4,20 @@ Agent Smith is a repo-local orchestration layer for Codex. It connects durable p
 
 The repository is currently **alpha**. The Codex connector and doctor workflow are the supported integration path; the older scan/session API remains available for compatibility.
 
+## Quick start: one command
+
+From the root of a new or existing project, run:
+
+```bash
+uvx --from "https://github.com/artiehinz/agent-smith/archive/refs/heads/main.zip" agent-smith setup .
+```
+
+This downloads Agent Smith into a temporary tool environment, connects the current project, validates every required file, and exits. It does not clone Agent Smith into the project or install a permanent package.
+
+Then restart Codex in that project and run `/hooks` once to inspect and trust the Agent Smith hooks. After that, use Codex normally—there is no Agent Smith command to run for each task.
+
+Requirement: [`uv`](https://docs.astral.sh/uv/getting-started/installation/), which creates an isolated environment and selects a compatible Python. If `uv` is unavailable, use the Python 3.11+ fallback below.
+
 ## What a connection installs
 
 Running `connect` adds only namespaced, reviewable project files:
@@ -20,17 +34,16 @@ Existing `AGENTS.md`, `.codex/config.toml`, and `.gitignore` content is preserve
 If a generated role or skill file was edited locally, an update stops instead of overwriting it; inspect the change and pass `--force` only when replacement is intended.
 The project-owned context file is never overwritten by reconnect, `--force`, or disconnect.
 
-## Connect a project
+## Other connection options
 
-### Git submodule (recommended)
+### Git submodule
 
 From the project you want Codex to work on:
 
 ```bash
 git submodule add https://github.com/artiehinz/agent-smith.git tools/agent-smith
 git submodule update --init --recursive
-python tools/agent-smith/smith.py connect .
-python tools/agent-smith/smith.py doctor .
+python tools/agent-smith/smith.py setup .
 ```
 
 Restart Codex in the host project after connecting so it rebuilds its project instruction, skill, role, and hook catalog. Project-local command hooks require an explicit trust review: run `/hooks` in Codex once, inspect the Agent Smith entries, and trust them. Codex will request review again if their definitions change.
@@ -39,15 +52,21 @@ Restart Codex in the host project after connecting so it rebuilds its project in
 
 ```bash
 git clone https://github.com/artiehinz/agent-smith.git
-python agent-smith/smith.py connect path/to/your-project
+python agent-smith/smith.py setup path/to/your-project
 ```
 
 ### Install the CLI
 
 ```bash
 python -m pip install "git+https://github.com/artiehinz/agent-smith.git"
-agent-smith connect path/to/your-project
-agent-smith doctor path/to/your-project
+agent-smith setup path/to/your-project
+```
+
+The same fallback works when Agent Smith is installed from the GitHub archive rather than Git:
+
+```bash
+python -m pip install --user "https://github.com/artiehinz/agent-smith/archive/refs/heads/main.zip"
+python -m agent_smith setup path/to/your-project
 ```
 
 No LLM API key is required by Agent Smith itself.
@@ -89,8 +108,7 @@ Update the submodule and regenerate managed files:
 
 ```bash
 git submodule update --remote tools/agent-smith
-python tools/agent-smith/smith.py connect .
-python tools/agent-smith/smith.py doctor .
+python tools/agent-smith/smith.py setup .
 ```
 
 Disconnect safely:

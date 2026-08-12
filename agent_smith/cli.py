@@ -17,7 +17,24 @@ def _print_doctor(result: dict[str, object]) -> None:
         check = raw if isinstance(raw, dict) else {}
         label = str(check.get("status", "unknown")).upper().ljust(4)
         print(f"[{label}] {check.get('name')}: {check.get('detail')}")
-    print("\nAgent Smith is ready." if result.get("ok") else "\nAgent Smith is not fully connected. Run `agent-smith connect .`.")
+    print("\nAgent Smith is ready." if result.get("ok") else "\nAgent Smith is not fully connected. Review the failed checks above.")
+
+
+def _print_connected(result: dict[str, object]) -> None:
+    print(f"Connected Agent Smith {result['version']} to {result['project']} ({result['managed_files']} managed files).")
+
+
+def _setup(args: argparse.Namespace) -> int:
+    connected = connect(args.project, force=args.force)
+    _print_connected(connected)
+    print("\nValidating the connection...\n")
+    validation = doctor(args.project)
+    _print_doctor(validation)
+    if not validation.get("ok"):
+        return 1
+    print("\nOne-time Codex step: restart Codex in this project, run `/hooks`, and trust the Agent Smith hooks.")
+    print("After that, use Codex normally; Agent Smith loads automatically for repository work.")
+    return 0
 
 
 def _route(args: argparse.Namespace) -> int:
@@ -74,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    command = subparsers.add_parser("setup", help="connect and validate a new project in one step")
+    command.add_argument("project", nargs="?", default=".")
+    command.add_argument("--force", action="store_true", help="replace modified or unowned generated files")
+
     for name in ("connect", "init"):
         command = subparsers.add_parser(name, help="install or update the repo-local Codex integration")
         command.add_argument("project", nargs="?", default=".")
@@ -112,10 +133,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "setup":
+            return _setup(args)
         if args.command in {"connect", "init"}:
             result = connect(args.project, force=args.force)
-            print(f"Connected Agent Smith {result['version']} to {result['project']} ({result['managed_files']} managed files).")
-            print("Restart Codex in that project, then run `agent-smith doctor .`.")
+            _print_connected(result)
+            print("Run `agent-smith doctor .` to validate, or use `agent-smith setup .` to do both.")
             return 0
         if args.command == "doctor":
             result = doctor(args.project)
