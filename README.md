@@ -9,14 +9,14 @@ The repository is currently **alpha**. The Codex connector and doctor workflow a
 From the root of a new or existing project, run:
 
 ```bash
-uvx --from "https://github.com/artiehinz/agent-smith/archive/refs/heads/main.zip" agent-smith setup .
+uvx --from "git+https://github.com/artiehinz/agent-smith.git" agent-smith setup .
 ```
 
 This downloads Agent Smith into a temporary tool environment, connects the current project, validates every required file, and exits. It does not clone Agent Smith into the project or install a permanent package.
 
 Then restart Codex in that project and run `/hooks` once to inspect and trust the Agent Smith hooks. After that, use Codex normally—there is no Agent Smith command to run for each task.
 
-Requirement: [`uv`](https://docs.astral.sh/uv/getting-started/installation/), which creates an isolated environment and selects a compatible Python. If `uv` is unavailable, use the Python 3.11+ fallback below.
+Requirements: Git and [`uv`](https://docs.astral.sh/uv/getting-started/installation/), which creates an isolated environment and selects a compatible Python. If `uv` is unavailable, use the Python 3.11+ fallback below.
 
 ## What a connection installs
 
