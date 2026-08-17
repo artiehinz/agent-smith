@@ -4,6 +4,8 @@ Agent Smith is a repo-local orchestration layer for Codex. It connects durable p
 
 The repository is currently **alpha**. The Codex connector and doctor workflow are the supported integration path; the older scan/session API remains available for compatibility.
 
+See the [active roadmap](docs/ROADMAP.md) for the implemented foundation, planned local retrieval/MCP stack, and explicit non-goals.
+
 ## Quick start: one command
 
 From the root of a new or existing project, run:
